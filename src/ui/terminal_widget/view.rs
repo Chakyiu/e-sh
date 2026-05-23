@@ -31,8 +31,8 @@ impl<'a> TerminalView<'a> {
             Sense::click_and_drag(),
         );
 
-        // While the terminal has focus, capture Tab (and arrow keys) so they reach the
-        // remote shell instead of moving egui's keyboard focus to other widgets/buttons.
+        // While the terminal has focus, capture Tab, arrows, and Escape so they reach the
+        // remote shell instead of being handled by egui (focus navigation, cancel, etc.).
         if response.has_focus() {
             ui.memory_mut(|m| {
                 m.set_focus_lock_filter(
@@ -41,7 +41,7 @@ impl<'a> TerminalView<'a> {
                         tab: true,
                         horizontal_arrows: true,
                         vertical_arrows: true,
-                        escape: false,
+                        escape: true,
                     },
                 );
             });
