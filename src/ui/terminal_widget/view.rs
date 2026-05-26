@@ -1,7 +1,7 @@
 use alacritty_terminal::index::Side;
 use egui::{
-    Area, Color32, CornerRadius, EventFilter, FontFamily, FontId, Frame, Key, Modifiers, Order,
-    Pos2, Rect, Sense, Stroke, TextEdit, TextStyle, Ui, Vec2,
+    Area, Color32, CornerRadius, EventFilter, FontFamily, FontId, Frame, ImeEvent, Key, Modifiers,
+    Order, Pos2, Rect, Sense, Stroke, TextEdit, TextStyle, Ui, Vec2,
 };
 
 use super::TerminalEmulator;
@@ -209,18 +209,22 @@ impl<'a> TerminalView<'a> {
             response.request_focus();
         }
 
-        let to_cell = |pos: Pos2| -> (i32, usize, Side) {
-            let local_x = (pos.x - origin.x).max(0.0);
-            let local_y = (pos.y - origin.y).max(0.0);
-            let col_f = local_x / cell_width;
+        let to_cell = |pos: Pos2, display_offset: usize| -> (i32, usize, Side) {
+            let col_f = (pos.x - origin.x).max(0.0) / cell_width;
             let col = (col_f as usize).min((cols as usize).saturating_sub(1));
             let frac = col_f - col_f.floor();
             let side = if frac < 0.5 { Side::Left } else { Side::Right };
-            let row = (local_y / row_height) as usize;
-            let row = row.min((rows as usize).saturating_sub(1));
-            let line = row as i32 - snapshot.display_offset as i32;
+            let row_f = (pos.y - origin.y) / row_height;
+            let row = row_f
+                .floor()
+                .clamp(0.0, (rows as f32 - 1.0).max(0.0)) as usize;
+            let line = row as i32 - display_offset as i32;
             (line, col, side)
         };
+
+        let term_rect = response.rect;
+        let edge_scroll_zone = row_height * 1.5;
+        let drag_selecting = response.dragged();
 
         // Capture the pointer-press position so we can use it as the
         // selection anchor.  `drag_started()` fires only after the pointer
@@ -246,14 +250,27 @@ impl<'a> TerminalView<'a> {
             let anchor_pos: Option<Pos2> = ui.data(|d| d.get_temp(press_key));
             let pos = anchor_pos.or(response.interact_pointer_pos());
             if let Some(pos) = pos {
-                let (line, col, _side) = to_cell(pos);
+                let display_offset = self.emulator.display_offset();
+                let (line, col, _side) = to_cell(pos, display_offset);
                 // Always anchor on the Left side so the character under the
                 // cursor is included when dragging forward.
                 self.emulator.begin_selection(line, col, Side::Left);
             }
         } else if response.dragged() {
-            if let Some(pos) = response.interact_pointer_pos() {
-                let (line, col, side) = to_cell(pos);
+            if let Some(pos) = ui
+                .ctx()
+                .pointer_interact_pos()
+                .or(response.interact_pointer_pos())
+            {
+                if pos.y < term_rect.min.y + edge_scroll_zone {
+                    self.emulator.scroll(1);
+                    ui.ctx().request_repaint();
+                } else if pos.y > term_rect.max.y - edge_scroll_zone {
+                    self.emulator.scroll(-1);
+                    ui.ctx().request_repaint();
+                }
+                let display_offset = self.emulator.display_offset();
+                let (line, col, side) = to_cell(pos, display_offset);
                 self.emulator.update_selection(line, col, side);
             }
         }
@@ -266,7 +283,8 @@ impl<'a> TerminalView<'a> {
             let anchor_pos: Option<Pos2> = ui.data(|d| d.get_temp(press_key));
             let pos = anchor_pos.or(response.interact_pointer_pos());
             if let Some(pos) = pos {
-                let (line, col, _side) = to_cell(pos);
+                let display_offset = self.emulator.display_offset();
+                let (line, col, _side) = to_cell(pos, display_offset);
                 let prev: Option<(f64, i32, usize)> = ui.data(|d| d.get_temp(dblclick_key));
                 let is_double = prev
                     .map(|(t, pl, pc)| (now - t) < 0.4 && pl == line && pc == col)
@@ -283,7 +301,7 @@ impl<'a> TerminalView<'a> {
             }
         }
 
-        if response.hovered() {
+        if response.hovered() && !drag_selecting {
             let scroll_delta = ui.ctx().input(|i| i.smooth_scroll_delta.y);
             if scroll_delta.abs() > 0.5 {
                 let lines = (scroll_delta / row_height).round() as i32;
@@ -306,6 +324,9 @@ impl<'a> TerminalView<'a> {
             let (events, mods) = ui
                 .ctx()
                 .input(|input| (input.events.clone(), input.modifiers));
+            let paste_text = resolve_paste_text(&events, mods);
+            let paste_active = paste_text.as_ref().is_some_and(|t| !t.is_empty());
+
             let mut buf: Vec<u8> = Vec::new();
             // Keys that may also produce `Event::Text`: defer one frame to avoid duplicate bytes
             // when both Key and Text fire (e.g. `:`), but still emit if Text is missing (Vim `:`).
@@ -324,6 +345,9 @@ impl<'a> TerminalView<'a> {
                         }
                     }
                     egui::Event::Text(text) => {
+                        if paste_active {
+                            continue;
+                        }
                         if mods.command && (text == "c" || text == "C") {
                             continue;
                         }
@@ -345,18 +369,38 @@ impl<'a> TerminalView<'a> {
                             buf.extend_from_slice(text.as_bytes());
                         }
                     }
-                    egui::Event::Paste(text) => {
-                        if let Some(p) = pending_printable.take() {
-                            buf.push(p);
+                    egui::Event::Paste(_) => continue,
+                    egui::Event::Ime(ImeEvent::Commit(text)) => {
+                        if paste_active {
+                            continue;
                         }
-                        buf.extend_from_slice(text.as_bytes());
+                        if text.len() >= PASTE_BURST_MIN_LEN {
+                            if let Some(p) = pending_printable.take() {
+                                buf.push(p);
+                            }
+                            if !buf.is_empty() {
+                                self.emulator.scroll_to_bottom();
+                                self.emulator.send_input(std::mem::take(&mut buf));
+                            }
+                            self.emulator.scroll_to_bottom();
+                            self.emulator.send_paste(text);
+                        } else {
+                            if let Some(p) = pending_printable.take() {
+                                buf.push(p);
+                            }
+                            buf.extend_from_slice(text.as_bytes());
+                        }
                     }
+                    egui::Event::Ime(_) => {}
                     egui::Event::Key {
                         key,
                         pressed: true,
                         modifiers,
                         ..
                     } => {
+                        if is_paste_key(*key, *modifiers) {
+                            continue;
+                        }
                         if copy_combo && matches!(key, Key::C) {
                             if let Some(text) = self.emulator.selection_text() {
                                 if !text.is_empty() {
@@ -411,6 +455,13 @@ impl<'a> TerminalView<'a> {
 
             if let Some(p) = pending_printable.take() {
                 buf.push(p);
+            }
+
+            if let Some(text) = paste_text {
+                if !text.is_empty() {
+                    self.emulator.scroll_to_bottom();
+                    self.emulator.send_paste(&text);
+                }
             }
 
             if !buf.is_empty() {
@@ -535,6 +586,76 @@ impl<'a> TerminalView<'a> {
             self.emulator.close_find();
         }
     }
+}
+
+/// Minimum combined `Event::Text` length in one frame to treat as a paste burst
+/// (some platforms inject clipboard content as many single-char Text events).
+const PASTE_BURST_MIN_LEN: usize = 16;
+
+fn is_paste_key(key: Key, modifiers: Modifiers) -> bool {
+    match key {
+        Key::V if (modifiers.command && !modifiers.shift) || (modifiers.ctrl && modifiers.shift) => {
+            true
+        }
+        Key::Insert if modifiers.shift => true,
+        Key::Paste => true,
+        _ => false,
+    }
+}
+
+fn read_clipboard_text() -> Option<String> {
+    arboard::Clipboard::new()
+        .ok()
+        .and_then(|mut cb| cb.get_text().ok())
+        .map(|s| s.replace("\r\n", "\n").replace('\r', "\n"))
+        .filter(|s| !s.is_empty())
+}
+
+fn collect_burst_text(events: &[egui::Event], mods: Modifiers) -> Option<String> {
+    if mods.command || mods.ctrl || mods.mac_cmd {
+        return None;
+    }
+    let mut burst = String::new();
+    for ev in events {
+        if let egui::Event::Text(t) = ev {
+            burst.push_str(t);
+        }
+    }
+    if burst.len() >= PASTE_BURST_MIN_LEN {
+        Some(burst)
+    } else {
+        None
+    }
+}
+
+fn resolve_paste_text(events: &[egui::Event], mods: Modifiers) -> Option<String> {
+    for ev in events {
+        if let egui::Event::Paste(text) = ev {
+            if !text.is_empty() {
+                return Some(text.replace("\r\n", "\n").replace('\r', "\n"));
+            }
+        }
+    }
+
+    let shortcut_pressed = events.iter().any(|ev| {
+        matches!(
+            ev,
+            egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } if is_paste_key(*key, *modifiers)
+        )
+    });
+
+    if shortcut_pressed {
+        if let Some(text) = read_clipboard_text() {
+            return Some(text);
+        }
+    }
+
+    collect_burst_text(events, mods)
 }
 
 /// Single-byte keys where winit/egui often sends `Event::Text` as well as `Event::Key`.

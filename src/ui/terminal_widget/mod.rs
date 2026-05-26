@@ -116,6 +116,35 @@ impl TerminalEmulator {
         }
     }
 
+    /// Send clipboard text as a single PTY write. Wraps in bracketed-paste
+    /// sequences when the remote app has enabled mode 2004 (vim, readline, etc.).
+    pub fn send_paste(&self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        use alacritty_terminal::term::TermMode;
+
+        let bracketed = self
+            .term
+            .lock()
+            .mode()
+            .contains(TermMode::BRACKETED_PASTE);
+        const START: &[u8] = b"\x1b[200~";
+        const END: &[u8] = b"\x1b[201~";
+
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        let mut bytes =
+            Vec::with_capacity(START.len() + normalized.len() + END.len());
+        if bracketed {
+            bytes.extend_from_slice(START);
+        }
+        bytes.extend_from_slice(normalized.as_bytes());
+        if bracketed {
+            bytes.extend_from_slice(END);
+        }
+        self.send_input(bytes);
+    }
+
     pub fn resize(&mut self, cols: u16, rows: u16) {
         if cols == self.cols && rows == self.rows {
             return;

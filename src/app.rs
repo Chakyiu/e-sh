@@ -66,6 +66,7 @@ pub struct EshApp {
     toaster: Toaster,
     palette: CommandPalette,
     sidebar_visible: bool,
+    connection_filter: String,
     quit_requested: bool,
     /// Timestamp of last successful master password verification for reveal.
     last_master_verify: Option<std::time::Instant>,
@@ -136,6 +137,7 @@ impl EshApp {
             toaster: Toaster::default(),
             palette: CommandPalette::default(),
             sidebar_visible: true,
+            connection_filter: String::new(),
             quit_requested: false,
             last_master_verify: None,
             reauth_prompt: None,
@@ -1009,7 +1011,11 @@ impl App for EshApp {
                 .resizable(true)
                 .default_size(240.0)
                 .show_inside(ui, |ui| {
-                    let action = ConnectionTree { store: &self.store }.show(ui);
+                    let action = ConnectionTree {
+                        store: &self.store,
+                        filter: &mut self.connection_filter,
+                    }
+                    .show(ui);
                     if action.new_connection {
                         self.start_new_connection();
                     }

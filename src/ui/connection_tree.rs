@@ -1,11 +1,15 @@
 use egui::{
-    CollapsingHeader, FontId, Frame, Id, LayerId, Order, PointerButton, ScrollArea, Sense, Stroke,
-    Ui, UiBuilder,
+    CollapsingHeader, FontId, Frame, Id, LayerId, Order, PointerButton, RichText, ScrollArea,
+    Sense, Stroke, TextEdit, Ui, UiBuilder,
 };
 use egui::containers::scroll_area::ScrollSource;
+use nucleo_matcher::{
+    Matcher, Utf32Str,
+    pattern::{CaseMatching, Normalization, Pattern},
+};
 use uuid::Uuid;
 
-use crate::core::connection::{ConnectionStore, Protocol};
+use crate::core::connection::{Connection, ConnectionStore, Protocol};
 
 const DRAG_THRESHOLD: f32 = 4.0;
 
@@ -28,6 +32,7 @@ fn mem_press_start() -> Id {
 
 pub struct ConnectionTree<'a> {
     pub store: &'a ConnectionStore,
+    pub filter: &'a mut String,
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +72,7 @@ impl<'a> ConnectionTree<'a> {
             });
         });
         ui.separator();
+        render_filter_row(ui, self.filter);
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
             if ui
                 .selectable_label(false, "⚙ Settings")
@@ -87,25 +93,30 @@ impl<'a> ConnectionTree<'a> {
                         ..Default::default()
                     })
                     .show(ui, |ui| {
+                    let filtering = !self.filter.trim().is_empty();
+                    let filtered = filter_connections(&self.store.connections, self.filter);
                     let mut group_order: Vec<String> = Vec::new();
-                    let mut groups: std::collections::HashMap<String, Vec<&_>> =
+                    let mut groups: std::collections::HashMap<String, Vec<&Connection>> =
                         std::collections::HashMap::new();
-                    for c in &self.store.connections {
+                    for c in filtered {
                         let key = c.group.clone().unwrap_or_else(|| "Default".to_string());
                         if !groups.contains_key(&key) {
                             group_order.push(key.clone());
                         }
                         groups.entry(key).or_default().push(c);
                     }
-                    if group_order.is_empty() {
+                    if self.store.connections.is_empty() {
                         ui.weak("No saved connections.");
                         ui.weak("Click ＋ above to add one.");
+                    } else if filtering && group_order.is_empty() {
+                        ui.weak("No matches.");
                     }
                     for group in group_order {
                         let items = groups.remove(&group).unwrap_or_default();
                         let group_clone = group.clone();
                         CollapsingHeader::new(&group)
                             .default_open(true)
+                            .open(if filtering { Some(true) } else { None })
                             .show(ui, |ui| {
                                 draw_group(ui, &group_clone, &items, &mut action);
                             });
@@ -356,4 +367,53 @@ fn paint_row_body(
     prepared.paint(ui);
 
     response.rect
+}
+
+fn render_filter_row(ui: &mut Ui, filter: &mut String) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("\u{1F50D}").small());
+        let avail = ui.available_width() - 24.0;
+        ui.add(
+            TextEdit::singleline(filter)
+                .id(Id::new("connection_tree_filter"))
+                .desired_width(avail.max(40.0))
+                .hint_text("Search"),
+        );
+        if !filter.is_empty() && ui.small_button("x").clicked() {
+            filter.clear();
+        }
+    });
+    ui.add_space(2.0);
+}
+
+fn connection_haystack(c: &Connection) -> String {
+    let group = c.group.as_deref().unwrap_or("Default");
+    format!(
+        "{} {} {} {}",
+        c.name,
+        c.protocol.label(),
+        c.display_address(),
+        group,
+    )
+}
+
+fn filter_connections<'a>(connections: &'a [Connection], query: &str) -> Vec<&'a Connection> {
+    let q = query.trim();
+    if q.is_empty() {
+        return connections.iter().collect();
+    }
+    let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
+    let pattern = Pattern::parse(q, CaseMatching::Ignore, Normalization::Smart);
+    let mut scored: Vec<(u32, &Connection)> = Vec::with_capacity(connections.len());
+    let mut haystack_buf = Vec::new();
+    for c in connections {
+        let combined = connection_haystack(c);
+        haystack_buf.clear();
+        let hay = Utf32Str::new(&combined, &mut haystack_buf);
+        if let Some(score) = pattern.score(hay, &mut matcher) {
+            scored.push((score, c));
+        }
+    }
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.into_iter().map(|(_, c)| c).collect()
 }

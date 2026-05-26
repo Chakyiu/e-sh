@@ -1171,11 +1171,12 @@ dependencies = [
 
 [[package]]
 name = "e-sh"
-version = "2.7.2"
+version = "2.7.3"
 dependencies = [
  "age",
  "alacritty_terminal",
  "anyhow",
+ "arboard",
  "async-trait",
  "base64 0.22.1",
  "chrono",
