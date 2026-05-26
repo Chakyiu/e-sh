@@ -58,7 +58,7 @@ chrono = { version = "0.4", default-features = false, features = [
     "serde",
 ] }
 image = { version = "0.25", default-features = false, features = ["png"] }
-reqwest = { version = "0.13.2", default-features = false, features = [
+reqwest = { version = "0.13.4", default-features = false, features = [
     "rustls",
     "json",
 ] }
