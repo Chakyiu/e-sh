@@ -437,7 +437,9 @@ impl<'a> TerminalView<'a> {
                             self.emulator.scroll_to_bottom();
                             continue;
                         }
-                        if let Some(seq) = key_to_bytes(*key, *modifiers) {
+                        if let Some(seq) =
+                            key_to_bytes(*key, *modifiers, self.emulator.app_cursor_keys())
+                        {
                             if let Some(p) = pending_printable.take() {
                                 buf.push(p);
                             }
@@ -676,7 +678,7 @@ fn deferred_printable_key_byte(key: Key, mods: Modifiers) -> Option<u8> {
     }
 }
 
-fn key_to_bytes(key: Key, mods: Modifiers) -> Option<Vec<u8>> {
+fn key_to_bytes(key: Key, mods: Modifiers, app_cursor: bool) -> Option<Vec<u8>> {
     use Key::*;
     // Option/Alt + horizontal arrows: readline / zsh emacs-style word motion (Meta-b / Meta-f).
     if mods.alt && !mods.ctrl && !mods.command && !mods.mac_cmd {
@@ -691,7 +693,25 @@ fn key_to_bytes(key: Key, mods: Modifiers) -> Option<Vec<u8>> {
             return Some(vec![b]);
         }
     }
-    let bytes: &[u8] = match key {
+    let bytes: &[u8] = if app_cursor {
+        match key {
+            ArrowUp => b"\x1bOA",
+            ArrowDown => b"\x1bOB",
+            ArrowRight => b"\x1bOC",
+            ArrowLeft => b"\x1bOD",
+            Home => b"\x1bOH",
+            End => b"\x1bOF",
+            _ => cursor_key_bytes_normal(key)?,
+        }
+    } else {
+        cursor_key_bytes_normal(key)?
+    };
+    Some(bytes.to_vec())
+}
+
+fn cursor_key_bytes_normal(key: Key) -> Option<&'static [u8]> {
+    use Key::*;
+    Some(match key {
         Enter => b"\r",
         Tab => b"\t",
         Backspace => b"\x7f",
@@ -719,8 +739,7 @@ fn key_to_bytes(key: Key, mods: Modifiers) -> Option<Vec<u8>> {
         F11 => b"\x1b[23~",
         F12 => b"\x1b[24~",
         _ => return None,
-    };
-    Some(bytes.to_vec())
+    })
 }
 
 fn ctrl_byte(key: Key) -> Option<u8> {

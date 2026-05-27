@@ -11,7 +11,7 @@ use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::test::TermSize;
-use alacritty_terminal::term::{Config as TermConfig, Term};
+use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
 use parking_lot::FairMutex;
 use tokio::sync::mpsc::UnboundedSender;
@@ -393,6 +393,11 @@ impl TerminalEmulator {
 
     pub fn display_offset(&self) -> usize {
         self.term.lock().grid().display_offset()
+    }
+
+    /// True when the remote app enabled DECCKM (e.g. vim), so cursor keys use SS3 (`ESC O …`).
+    pub fn app_cursor_keys(&self) -> bool {
+        self.term.lock().mode().contains(TermMode::APP_CURSOR)
     }
 }
 
