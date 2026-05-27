@@ -1112,7 +1112,7 @@ impl App for EshApp {
 
         if let Some(prompt) = self.master_prompt.as_mut() {
             match prompt.show(&ctx) {
-                MasterPasswordResult::Pending => {}
+                MasterPasswordResult::Pending | MasterPasswordResult::Cancelled => {}
                 MasterPasswordResult::Submit(pw) => {
                     if let Err(err) = self.try_unlock_or_create(pw) {
                         if let Some(p) = self.master_prompt.as_mut() {
@@ -1187,8 +1187,7 @@ impl App for EshApp {
                     }
                 } else {
                     self.reauth_target = result.reveal_requested;
-                    self.reauth_prompt =
-                        Some(MasterPasswordPromptUi::new(MasterPasswordMode::Unlock));
+                    self.reauth_prompt = Some(MasterPasswordPromptUi::for_reauth());
                 }
             }
         }
@@ -1197,6 +1196,10 @@ impl App for EshApp {
         if let Some(prompt) = self.reauth_prompt.as_mut() {
             match prompt.show(&ctx) {
                 MasterPasswordResult::Pending => {}
+                MasterPasswordResult::Cancelled => {
+                    self.reauth_prompt = None;
+                    self.reauth_target = RevealRequest::None;
+                }
                 MasterPasswordResult::Submit(pw) => {
                     if let Some(secrets) = &self.secrets {
                         if secrets.verify_password(&pw) {

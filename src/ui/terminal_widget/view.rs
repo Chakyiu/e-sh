@@ -96,40 +96,12 @@ impl<'a> TerminalView<'a> {
             }
         }
 
-        if snapshot.cursor_visible && snapshot.display_offset == 0 {
-            let focused = response.has_focus();
-            let cursor_blink_on = if focused {
-                ui.ctx().request_repaint();
-                let phase = ui.ctx().input(|i| i.time) % 1.0;
-                phase < 0.5
-            } else {
-                true
-            };
-            if cursor_blink_on {
-                let (cy, cx) = snapshot.cursor;
-                let cursor_rect = Rect::from_min_size(
-                    Pos2::new(
-                        origin.x + cx as f32 * cell_width,
-                        origin.y + cy as f32 * row_height,
-                    ),
-                    Vec2::new(cell_width, row_height),
-                );
-                if focused {
-                    painter.rect_filled(
-                        cursor_rect,
-                        0.0,
-                        Color32::from_rgba_unmultiplied(0xea, 0xea, 0xea, 0xb0),
-                    );
-                } else {
-                    painter.rect_stroke(
-                        cursor_rect,
-                        0.0,
-                        Stroke::new(1.0, Color32::from_rgb(0x66, 0x66, 0x6a)),
-                        egui::StrokeKind::Inside,
-                    );
-                }
-            }
-        }
+        let now = ui.ctx().input(|i| i.time);
+        let typing_key = egui::Id::new(("term_last_typing", self.emulator as *const _ as usize));
+        let mut typing_active = ui.data(|d| {
+            let last = d.get_temp::<f64>(typing_key).unwrap_or(0.0);
+            now - last < 1.0
+        });
 
         if self.emulator.find.open && !self.emulator.find.matches.is_empty() {
             let display_offset = self.emulator.display_offset() as i32;
@@ -381,9 +353,13 @@ impl<'a> TerminalView<'a> {
                             if !buf.is_empty() {
                                 self.emulator.scroll_to_bottom();
                                 self.emulator.send_input(std::mem::take(&mut buf));
+                                typing_active = true;
+                                ui.data_mut(|d| d.insert_temp(typing_key, now));
                             }
                             self.emulator.scroll_to_bottom();
                             self.emulator.send_paste(text);
+                            typing_active = true;
+                            ui.data_mut(|d| d.insert_temp(typing_key, now));
                         } else {
                             if let Some(p) = pending_printable.take() {
                                 buf.push(p);
@@ -463,12 +439,55 @@ impl<'a> TerminalView<'a> {
                 if !text.is_empty() {
                     self.emulator.scroll_to_bottom();
                     self.emulator.send_paste(&text);
+                    typing_active = true;
+                    ui.data_mut(|d| d.insert_temp(typing_key, now));
                 }
             }
 
             if !buf.is_empty() {
                 self.emulator.scroll_to_bottom();
                 self.emulator.send_input(buf);
+                typing_active = true;
+                ui.data_mut(|d| d.insert_temp(typing_key, now));
+            }
+        }
+
+        if snapshot.cursor_visible && snapshot.display_offset == 0 {
+            let focused = response.has_focus();
+            let cursor_blink_on = if focused {
+                if typing_active {
+                    true
+                } else {
+                    ui.ctx().request_repaint();
+                    let phase = now % 1.0;
+                    phase < 0.5
+                }
+            } else {
+                true
+            };
+            if cursor_blink_on {
+                let (cy, cx) = snapshot.cursor;
+                let cursor_rect = Rect::from_min_size(
+                    Pos2::new(
+                        origin.x + cx as f32 * cell_width,
+                        origin.y + cy as f32 * row_height,
+                    ),
+                    Vec2::new(cell_width, row_height),
+                );
+                if focused {
+                    painter.rect_filled(
+                        cursor_rect,
+                        0.0,
+                        Color32::from_rgba_unmultiplied(0xea, 0xea, 0xea, 0xb0),
+                    );
+                } else {
+                    painter.rect_stroke(
+                        cursor_rect,
+                        0.0,
+                        Stroke::new(1.0, Color32::from_rgb(0x66, 0x66, 0x6a)),
+                        egui::StrokeKind::Inside,
+                    );
+                }
             }
         }
     }

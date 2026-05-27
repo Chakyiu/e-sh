@@ -7,6 +7,7 @@ pub struct MasterPasswordPromptUi {
     pub password: String,
     pub confirm: String,
     pub error: Option<String>,
+    pub cancellable: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,6 +20,7 @@ pub enum MasterPasswordMode {
 pub enum MasterPasswordResult {
     Pending,
     Submit(String),
+    Cancelled,
 }
 
 impl MasterPasswordPromptUi {
@@ -28,25 +30,47 @@ impl MasterPasswordPromptUi {
             password: String::new(),
             confirm: String::new(),
             error: None,
+            cancellable: false,
+        }
+    }
+
+    pub fn for_reauth() -> Self {
+        Self {
+            mode: MasterPasswordMode::Unlock,
+            password: String::new(),
+            confirm: String::new(),
+            error: None,
+            cancellable: true,
         }
     }
 
     pub fn show(&mut self, ctx: &Context) -> MasterPasswordResult {
         let mut result = MasterPasswordResult::Pending;
 
-        let title = match self.mode {
-            MasterPasswordMode::Unlock => "Unlock secrets",
-            MasterPasswordMode::Create => "Set master password",
+        let title = if self.cancellable {
+            "Confirm master password"
+        } else {
+            match self.mode {
+                MasterPasswordMode::Unlock => "Unlock secrets",
+                MasterPasswordMode::Create => "Set master password",
+            }
         };
 
-        Window::new(title)
+        let mut open = true;
+        let mut window = Window::new(title)
             .collapsible(false)
             .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]);
+        if self.cancellable {
+            window = window.open(&mut open);
+        }
+        window.show(ctx, |ui| {
                 ui.set_min_width(420.0);
 
                 match self.mode {
+                    MasterPasswordMode::Unlock if self.cancellable => {
+                        ui.label("Enter your master password to reveal the saved credential.");
+                    }
                     MasterPasswordMode::Unlock => {
                         ui.label("Enter the master password to decrypt your saved credentials.");
                     }
@@ -101,8 +125,19 @@ impl MasterPasswordPromptUi {
                             result = MasterPasswordResult::Submit(self.password.clone());
                         }
                     }
+                    if self.cancellable {
+                        if ui.button("Cancel").clicked()
+                            || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                        {
+                            result = MasterPasswordResult::Cancelled;
+                        }
+                    }
                 });
             });
+
+        if self.cancellable && !open && matches!(result, MasterPasswordResult::Pending) {
+            result = MasterPasswordResult::Cancelled;
+        }
 
         result
     }

@@ -486,15 +486,62 @@ fn render_delete_confirm_dialogs(ui: &mut Ui, tab: &mut SftpTab) {
     }
 }
 
+const PANE_EMPTY_MIN_H: f32 = 80.0;
+
+fn refresh_pane(tab: &mut SftpTab, pane: Pane) {
+    match pane {
+        Pane::Local => {
+            tab.local_selected.clear();
+            tab.local_anchor = None;
+        }
+        Pane::Remote => {
+            tab.remote_loading = true;
+            let _ = tab
+                .handle
+                .commands
+                .send(SftpCommand::ListDir {
+                    path: tab.remote_cwd.clone(),
+                });
+        }
+    }
+}
+
+fn navigate_up_pane(tab: &mut SftpTab, pane: Pane) {
+    match pane {
+        Pane::Local => {
+            if let Some(parent) = tab.local_cwd.parent() {
+                tab.local_cwd = parent.to_path_buf();
+                tab.local_selected.clear();
+                tab.local_anchor = None;
+                tab.local_path_dirty = false;
+                sync_local_path_buffer(tab);
+            }
+        }
+        Pane::Remote => {
+            let parent = parent_remote(&tab.remote_cwd);
+            tab.remote_loading = true;
+            tab.remote_path_dirty = false;
+            let _ = tab.handle.commands.send(SftpCommand::ListDir { path: parent });
+        }
+    }
+}
+
 fn render_local_pane(ui: &mut Ui, tab: &mut SftpTab) {
     ui.label(RichText::new("Local").strong());
     render_local_breadcrumb(ui, tab);
     render_local_path_field(ui, tab);
-    render_filter_row(ui, &mut tab.local_filter, ("local_filter", tab.id));
+    if let Some(action) =
+        render_pane_toolbar(ui, &mut tab.local_filter, ("local_filter", tab.id))
+    {
+        match action {
+            PaneToolbarAction::Refresh => refresh_pane(tab, Pane::Local),
+            PaneToolbarAction::Up => navigate_up_pane(tab, Pane::Local),
+        }
+    }
     ui.separator();
 
     let entries = sorted_filtered_local(&list_local(&tab.local_cwd), &tab.local_filter, tab.local_sort);
-    let scroll_resp = ScrollArea::vertical()
+    let _scroll_resp = ScrollArea::vertical()
         .auto_shrink([false, false])
         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
         .show(ui, |ui| {
@@ -562,9 +609,14 @@ fn render_local_pane(ui: &mut Ui, tab: &mut SftpTab) {
                     });
             });
             if let Some(k) = clicked_header { toggle_sort(&mut tab.local_sort, k); }
-            ui.allocate_response(ui.available_size(), egui::Sense::click())
+            let w = ui.available_width();
+            let h = ui.available_height().max(PANE_EMPTY_MIN_H);
+            let empty = ui.allocate_response(egui::vec2(w, h), egui::Sense::click());
+            pane_empty_context_menu(&empty, tab, Pane::Local);
         });
-    pane_empty_context_menu(&scroll_resp.inner, tab, Pane::Local);
+    if ui.rect_contains_pointer(ui.max_rect()) && ui.input(|i| i.key_pressed(egui::Key::F5)) {
+        refresh_pane(tab, Pane::Local);
+    }
     render_mkdir_dialog(ui, tab, Pane::Local);
     render_rename_dialog(ui, tab, Pane::Local);
 }
@@ -683,6 +735,10 @@ fn local_entry_context_menu(resp: &egui::Response, tab: &mut SftpTab, entry: &Lo
             ui.close();
         }
         ui.separator();
+        if ui.button("Refresh").clicked() {
+            refresh_pane(tab, Pane::Local);
+            ui.close();
+        }
         ui.add_enabled_ui(n == 1, |ui| {
             if ui.button("Rename").clicked() {
                 let name = entry.path
@@ -707,7 +763,14 @@ fn render_remote_pane(ui: &mut Ui, tab: &mut SftpTab) {
     ui.label(RichText::new("Remote").strong());
     render_remote_breadcrumb(ui, tab);
     render_remote_path_field(ui, tab);
-    render_filter_row(ui, &mut tab.remote_filter, ("remote_filter", tab.id));
+    if let Some(action) =
+        render_pane_toolbar(ui, &mut tab.remote_filter, ("remote_filter", tab.id))
+    {
+        match action {
+            PaneToolbarAction::Refresh => refresh_pane(tab, Pane::Remote),
+            PaneToolbarAction::Up => navigate_up_pane(tab, Pane::Remote),
+        }
+    }
     ui.separator();
 
     if tab.remote_loading && tab.remote_entries.is_empty() {
@@ -716,7 +779,7 @@ fn render_remote_pane(ui: &mut Ui, tab: &mut SftpTab) {
     }
 
     let entries = sorted_filtered_remote(&tab.remote_entries, &tab.remote_filter, tab.remote_sort);
-    let scroll_resp = ScrollArea::vertical()
+    let _scroll_resp = ScrollArea::vertical()
         .auto_shrink([false, false])
         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
         .show(ui, |ui| {
@@ -789,9 +852,14 @@ fn render_remote_pane(ui: &mut Ui, tab: &mut SftpTab) {
                     });
             });
             if let Some(k) = clicked_header { toggle_sort(&mut tab.remote_sort, k); }
-            ui.allocate_response(ui.available_size(), egui::Sense::click())
+            let w = ui.available_width();
+            let h = ui.available_height().max(PANE_EMPTY_MIN_H);
+            let empty = ui.allocate_response(egui::vec2(w, h), egui::Sense::click());
+            pane_empty_context_menu(&empty, tab, Pane::Remote);
         });
-    pane_empty_context_menu(&scroll_resp.inner, tab, Pane::Remote);
+    if ui.rect_contains_pointer(ui.max_rect()) && ui.input(|i| i.key_pressed(egui::Key::F5)) {
+        refresh_pane(tab, Pane::Remote);
+    }
     render_mkdir_dialog(ui, tab, Pane::Remote);
     render_rename_dialog(ui, tab, Pane::Remote);
 }
@@ -901,6 +969,10 @@ fn remote_entry_context_menu(resp: &egui::Response, tab: &mut SftpTab, entry: &S
             ui.close();
         }
         ui.separator();
+        if ui.button("Refresh").clicked() {
+            refresh_pane(tab, Pane::Remote);
+            ui.close();
+        }
         ui.add_enabled_ui(n == 1, |ui| {
             if ui.button("Rename").clicked() {
                 tab.rename_buffer = entry.name.clone();
@@ -936,39 +1008,11 @@ fn pane_empty_context_menu(resp: &egui::Response, tab: &mut SftpTab, pane: Pane)
             ui.close();
         }
         if ui.button("Refresh").clicked() {
-            match pane {
-                Pane::Local => {
-                    tab.local_selected.clear();
-                    tab.local_anchor = None;
-                }
-                Pane::Remote => {
-                    tab.remote_loading = true;
-                    let _ = tab
-                        .handle
-                        .commands
-                        .send(SftpCommand::ListDir { path: tab.remote_cwd.clone() });
-                }
-            }
+            refresh_pane(tab, pane);
             ui.close();
         }
         if ui.button("Up").clicked() {
-            match pane {
-                Pane::Local => {
-                    if let Some(parent) = tab.local_cwd.parent() {
-                        tab.local_cwd = parent.to_path_buf();
-                        tab.local_selected.clear();
-                        tab.local_anchor = None;
-                        tab.local_path_dirty = false;
-                        sync_local_path_buffer(tab);
-                    }
-                }
-                Pane::Remote => {
-                    let parent = parent_remote(&tab.remote_cwd);
-                    tab.remote_loading = true;
-                    tab.remote_path_dirty = false;
-                    let _ = tab.handle.commands.send(SftpCommand::ListDir { path: parent });
-                }
-            }
+            navigate_up_pane(tab, pane);
             ui.close();
         }
     });
@@ -1235,13 +1279,23 @@ fn handle_dropped_files(ui: &mut Ui, tab: &mut SftpTab) {
     }
 }
 
-fn render_filter_row(ui: &mut Ui, buf: &mut String, id_src: impl std::hash::Hash) {
+enum PaneToolbarAction {
+    Refresh,
+    Up,
+}
+
+fn render_pane_toolbar(
+    ui: &mut Ui,
+    buf: &mut String,
+    filter_id: impl std::hash::Hash,
+) -> Option<PaneToolbarAction> {
+    let mut action = None;
     ui.horizontal(|ui| {
         ui.label(RichText::new("\u{1F50D}").small());
-        let avail = ui.available_width() - 24.0;
+        let avail = ui.available_width() - 88.0;
         ui.add(
             egui::TextEdit::singleline(buf)
-                .id(egui::Id::new(id_src))
+                .id(egui::Id::new(filter_id))
                 .desired_width(avail.max(40.0))
                 .hint_text("filter"),
         );
@@ -1250,7 +1304,18 @@ fn render_filter_row(ui: &mut Ui, buf: &mut String, id_src: impl std::hash::Hash
                 buf.clear();
             }
         }
+        if ui
+            .small_button("\u{21BB}")
+            .on_hover_text("Refresh (F5)")
+            .clicked()
+        {
+            action = Some(PaneToolbarAction::Refresh);
+        }
+        if ui.small_button("Up").on_hover_text("Go to parent folder").clicked() {
+            action = Some(PaneToolbarAction::Up);
+        }
     });
+    action
 }
 
 fn sort_header(ui: &mut Ui, label: &str, key: SortKey, current: (SortKey, SortDir)) -> egui::Response {
