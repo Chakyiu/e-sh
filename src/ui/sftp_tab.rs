@@ -541,79 +541,80 @@ fn render_local_pane(ui: &mut Ui, tab: &mut SftpTab) {
     ui.separator();
 
     let entries = sorted_filtered_local(&list_local(&tab.local_cwd), &tab.local_filter, tab.local_sort);
-    let _scroll_resp = ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
-        .show(ui, |ui| {
-            let mut clicked_header: Option<SortKey> = None;
-            ui.push_id(("sftp_local_table", tab.id), |ui| {
-                TableBuilder::new(ui)
-                    .striped(true)
-                    .resizable(true)
-                    .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                    .column(Column::initial(260.0).at_least(80.0).clip(true).resizable(true))
-                    .column(Column::initial(80.0).at_least(40.0).resizable(true))
-                    .column(Column::initial(160.0).at_least(80.0).resizable(true).clip(true))
-                    .header(20.0, |mut h| {
-                        h.col(|ui| { if sort_header(ui, "Name", SortKey::Name, tab.local_sort).clicked() { clicked_header = Some(SortKey::Name); } });
-                        h.col(|ui| { if sort_header(ui, "Size", SortKey::Size, tab.local_sort).clicked() { clicked_header = Some(SortKey::Size); } });
-                        h.col(|ui| { if sort_header(ui, "Modified", SortKey::Modified, tab.local_sort).clicked() { clicked_header = Some(SortKey::Modified); } });
-                    })
-                    .body(|mut body| {
-                        for (idx, entry) in entries.iter().enumerate() {
-                            body.row(20.0, |mut row| {
-                                row.col(|ui| {
-                                    let icon = if entry.is_dir { "\u{1F4C1}" } else { "\u{1F4C4}" };
-                                    let label = format!("{icon}  {}", entry.name);
-                                    let selected = tab.local_selected.contains(&entry.path);
-                                    let cell_size = egui::vec2(ui.available_width(), ui.available_height());
-                                    let (cell_rect, cell_resp) = ui.allocate_exact_size(cell_size, egui::Sense::click());
-                                    let bg = if selected {
-                                        ui.visuals().selection.bg_fill
-                                    } else if cell_resp.hovered() {
-                                        ui.visuals().widgets.hovered.bg_fill
-                                    } else {
-                                        egui::Color32::TRANSPARENT
-                                    };
-                                    ui.painter().rect_filled(cell_rect, 0.0, bg);
-                                    let text_pos = cell_rect.left_center() - egui::vec2(0.0, ui.text_style_height(&egui::TextStyle::Body) / 2.0);
-                                    ui.painter().text(
-                                        egui::pos2(text_pos.x + 4.0, text_pos.y),
-                                        egui::Align2::LEFT_TOP,
-                                        &label,
-                                        egui::TextStyle::Body.resolve(ui.style()),
-                                        ui.visuals().text_color(),
-                                    );
-                                    if cell_resp.clicked() {
-                                        let mods = ui.input(|i| i.modifiers);
-                                        update_local_selection(tab, &entries, idx, mods);
-                                    }
-                                    if cell_resp.secondary_clicked() && !tab.local_selected.contains(&entry.path) {
-                                        tab.local_selected.clear();
-                                        tab.local_selected.insert(entry.path.clone());
-                                        tab.local_anchor = Some(entry.path.clone());
-                                    }
-                                    if cell_resp.double_clicked() && entry.is_dir {
-                                        tab.local_cwd = entry.path.clone();
-                                        tab.local_selected.clear();
-                                        tab.local_anchor = None;
-                                        tab.local_path_dirty = false;
-                                        sync_local_path_buffer(tab);
-                                    }
-                                    local_entry_context_menu(&cell_resp, tab, entry);
-                                });
-                                row.col(|ui| { ui.label(RichText::new(format_size(entry.size)).small().monospace()); });
-                                row.col(|ui| { ui.label(RichText::new(format_mtime(entry.modified)).small().monospace()); });
-                            });
-                        }
+    let table_height = ui.available_height().max(PANE_EMPTY_MIN_H);
+    let mut clicked_header: Option<SortKey> = None;
+    ui.push_id(("sftp_local_table", tab.id), |ui| {
+        TableBuilder::new(ui)
+            .striped(true)
+            .resizable(true)
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .max_scroll_height(table_height)
+            .column(Column::initial(260.0).at_least(80.0).clip(true).resizable(true))
+            .column(Column::initial(80.0).at_least(40.0).resizable(true))
+            .column(Column::initial(160.0).at_least(80.0).resizable(true).clip(true))
+            .header(20.0, |mut h| {
+                h.col(|ui| { if sort_header(ui, "Name", SortKey::Name, tab.local_sort).clicked() { clicked_header = Some(SortKey::Name); } });
+                h.col(|ui| { if sort_header(ui, "Size", SortKey::Size, tab.local_sort).clicked() { clicked_header = Some(SortKey::Size); } });
+                h.col(|ui| { if sort_header(ui, "Modified", SortKey::Modified, tab.local_sort).clicked() { clicked_header = Some(SortKey::Modified); } });
+            })
+            .body(|mut body| {
+                for (idx, entry) in entries.iter().enumerate() {
+                    body.row(20.0, |mut row| {
+                        row.col(|ui| {
+                            let icon = if entry.is_dir { "\u{1F4C1}" } else { "\u{1F4C4}" };
+                            let label = format!("{icon}  {}", entry.name);
+                            let selected = tab.local_selected.contains(&entry.path);
+                            let cell_size = egui::vec2(ui.available_width(), ui.available_height());
+                            let (cell_rect, cell_resp) = ui.allocate_exact_size(cell_size, egui::Sense::click());
+                            let bg = if selected {
+                                ui.visuals().selection.bg_fill
+                            } else if cell_resp.hovered() {
+                                ui.visuals().widgets.hovered.bg_fill
+                            } else {
+                                egui::Color32::TRANSPARENT
+                            };
+                            ui.painter().rect_filled(cell_rect, 0.0, bg);
+                            let text_pos = cell_rect.left_center() - egui::vec2(0.0, ui.text_style_height(&egui::TextStyle::Body) / 2.0);
+                            ui.painter().text(
+                                egui::pos2(text_pos.x + 4.0, text_pos.y),
+                                egui::Align2::LEFT_TOP,
+                                &label,
+                                egui::TextStyle::Body.resolve(ui.style()),
+                                ui.visuals().text_color(),
+                            );
+                            if cell_resp.clicked() {
+                                let mods = ui.input(|i| i.modifiers);
+                                update_local_selection(tab, &entries, idx, mods);
+                            }
+                            if cell_resp.secondary_clicked() && !tab.local_selected.contains(&entry.path) {
+                                tab.local_selected.clear();
+                                tab.local_selected.insert(entry.path.clone());
+                                tab.local_anchor = Some(entry.path.clone());
+                            }
+                            if cell_resp.double_clicked() && entry.is_dir {
+                                tab.local_cwd = entry.path.clone();
+                                tab.local_selected.clear();
+                                tab.local_anchor = None;
+                                tab.local_path_dirty = false;
+                                sync_local_path_buffer(tab);
+                            }
+                            local_entry_context_menu(&cell_resp, tab, entry);
+                        });
+                        row.col(|ui| { ui.label(RichText::new(format_size(entry.size)).small().monospace()); });
+                        row.col(|ui| { ui.label(RichText::new(format_mtime(entry.modified)).small().monospace()); });
                     });
+                }
             });
-            if let Some(k) = clicked_header { toggle_sort(&mut tab.local_sort, k); }
-            let w = ui.available_width();
-            let h = ui.available_height().max(PANE_EMPTY_MIN_H);
-            let empty = ui.allocate_response(egui::vec2(w, h), egui::Sense::click());
-            pane_empty_context_menu(&empty, tab, Pane::Local);
-        });
+    });
+    if let Some(k) = clicked_header { toggle_sort(&mut tab.local_sort, k); }
+    let remaining_h = ui.available_height();
+    if remaining_h > 0.0 {
+        let empty = ui.allocate_response(
+            egui::vec2(ui.available_width(), remaining_h),
+            egui::Sense::click(),
+        );
+        pane_empty_context_menu(&empty, tab, Pane::Local);
+    }
     if ui.rect_contains_pointer(ui.max_rect()) && ui.input(|i| i.key_pressed(egui::Key::F5)) {
         refresh_pane(tab, Pane::Local);
     }
@@ -779,84 +780,85 @@ fn render_remote_pane(ui: &mut Ui, tab: &mut SftpTab) {
     }
 
     let entries = sorted_filtered_remote(&tab.remote_entries, &tab.remote_filter, tab.remote_sort);
-    let _scroll_resp = ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
-        .show(ui, |ui| {
-            let mut clicked_header: Option<SortKey> = None;
-            ui.push_id(("sftp_remote_table", tab.id), |ui| {
-                TableBuilder::new(ui)
-                    .striped(true)
-                    .resizable(true)
-                    .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                    .column(Column::initial(260.0).at_least(80.0).clip(true).resizable(true))
-                    .column(Column::initial(80.0).at_least(40.0).resizable(true))
-                    .column(Column::initial(160.0).at_least(80.0).resizable(true).clip(true))
-                    .header(20.0, |mut h| {
-                        h.col(|ui| { if sort_header(ui, "Name", SortKey::Name, tab.remote_sort).clicked() { clicked_header = Some(SortKey::Name); } });
-                        h.col(|ui| { if sort_header(ui, "Size", SortKey::Size, tab.remote_sort).clicked() { clicked_header = Some(SortKey::Size); } });
-                        h.col(|ui| { if sort_header(ui, "Modified", SortKey::Modified, tab.remote_sort).clicked() { clicked_header = Some(SortKey::Modified); } });
-                    })
-                    .body(|mut body| {
-                        for (idx, entry) in entries.iter().enumerate() {
-                            body.row(20.0, |mut row| {
-                                row.col(|ui| {
-                                    let icon = if entry.is_dir {
-                                        "\u{1F4C1}"
-                                    } else if entry.is_symlink {
-                                        "\u{1F517}"
-                                    } else {
-                                        "\u{1F4C4}"
-                                    };
-                                    let label = format!("{icon}  {}", entry.name);
-                                    let selected = tab.remote_selected.contains(&entry.name);
-                                    let cell_size = egui::vec2(ui.available_width(), ui.available_height());
-                                    let (cell_rect, cell_resp) = ui.allocate_exact_size(cell_size, egui::Sense::click());
-                                    let bg = if selected {
-                                        ui.visuals().selection.bg_fill
-                                    } else if cell_resp.hovered() {
-                                        ui.visuals().widgets.hovered.bg_fill
-                                    } else {
-                                        egui::Color32::TRANSPARENT
-                                    };
-                                    ui.painter().rect_filled(cell_rect, 0.0, bg);
-                                    let text_pos = cell_rect.left_center() - egui::vec2(0.0, ui.text_style_height(&egui::TextStyle::Body) / 2.0);
-                                    ui.painter().text(
-                                        egui::pos2(text_pos.x + 4.0, text_pos.y),
-                                        egui::Align2::LEFT_TOP,
-                                        &label,
-                                        egui::TextStyle::Body.resolve(ui.style()),
-                                        ui.visuals().text_color(),
-                                    );
-                                    if cell_resp.clicked() {
-                                        let mods = ui.input(|i| i.modifiers);
-                                        update_remote_selection(tab, &entries, idx, mods);
-                                    }
-                                    if cell_resp.secondary_clicked() && !tab.remote_selected.contains(&entry.name) {
-                                        tab.remote_selected.clear();
-                                        tab.remote_selected.insert(entry.name.clone());
-                                        tab.remote_anchor = Some(entry.name.clone());
-                                    }
-                                    if cell_resp.double_clicked() && entry.is_dir {
-                                        let path = join_remote(&tab.remote_cwd, &entry.name);
-                                        tab.remote_loading = true;
-                                        tab.remote_path_dirty = false;
-                                        let _ = tab.handle.commands.send(SftpCommand::ListDir { path });
-                                    }
-                                    remote_entry_context_menu(&cell_resp, tab, entry);
-                                });
-                                row.col(|ui| { ui.label(RichText::new(format_size(entry.size)).small().monospace()); });
-                                row.col(|ui| { ui.label(RichText::new(format_mtime(entry.modified)).small().monospace()); });
-                            });
-                        }
+    let table_height = ui.available_height().max(PANE_EMPTY_MIN_H);
+    let mut clicked_header: Option<SortKey> = None;
+    ui.push_id(("sftp_remote_table", tab.id), |ui| {
+        TableBuilder::new(ui)
+            .striped(true)
+            .resizable(true)
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .max_scroll_height(table_height)
+            .column(Column::initial(260.0).at_least(80.0).clip(true).resizable(true))
+            .column(Column::initial(80.0).at_least(40.0).resizable(true))
+            .column(Column::initial(160.0).at_least(80.0).resizable(true).clip(true))
+            .header(20.0, |mut h| {
+                h.col(|ui| { if sort_header(ui, "Name", SortKey::Name, tab.remote_sort).clicked() { clicked_header = Some(SortKey::Name); } });
+                h.col(|ui| { if sort_header(ui, "Size", SortKey::Size, tab.remote_sort).clicked() { clicked_header = Some(SortKey::Size); } });
+                h.col(|ui| { if sort_header(ui, "Modified", SortKey::Modified, tab.remote_sort).clicked() { clicked_header = Some(SortKey::Modified); } });
+            })
+            .body(|mut body| {
+                for (idx, entry) in entries.iter().enumerate() {
+                    body.row(20.0, |mut row| {
+                        row.col(|ui| {
+                            let icon = if entry.is_dir {
+                                "\u{1F4C1}"
+                            } else if entry.is_symlink {
+                                "\u{1F517}"
+                            } else {
+                                "\u{1F4C4}"
+                            };
+                            let label = format!("{icon}  {}", entry.name);
+                            let selected = tab.remote_selected.contains(&entry.name);
+                            let cell_size = egui::vec2(ui.available_width(), ui.available_height());
+                            let (cell_rect, cell_resp) = ui.allocate_exact_size(cell_size, egui::Sense::click());
+                            let bg = if selected {
+                                ui.visuals().selection.bg_fill
+                            } else if cell_resp.hovered() {
+                                ui.visuals().widgets.hovered.bg_fill
+                            } else {
+                                egui::Color32::TRANSPARENT
+                            };
+                            ui.painter().rect_filled(cell_rect, 0.0, bg);
+                            let text_pos = cell_rect.left_center() - egui::vec2(0.0, ui.text_style_height(&egui::TextStyle::Body) / 2.0);
+                            ui.painter().text(
+                                egui::pos2(text_pos.x + 4.0, text_pos.y),
+                                egui::Align2::LEFT_TOP,
+                                &label,
+                                egui::TextStyle::Body.resolve(ui.style()),
+                                ui.visuals().text_color(),
+                            );
+                            if cell_resp.clicked() {
+                                let mods = ui.input(|i| i.modifiers);
+                                update_remote_selection(tab, &entries, idx, mods);
+                            }
+                            if cell_resp.secondary_clicked() && !tab.remote_selected.contains(&entry.name) {
+                                tab.remote_selected.clear();
+                                tab.remote_selected.insert(entry.name.clone());
+                                tab.remote_anchor = Some(entry.name.clone());
+                            }
+                            if cell_resp.double_clicked() && entry.is_dir {
+                                let path = join_remote(&tab.remote_cwd, &entry.name);
+                                tab.remote_loading = true;
+                                tab.remote_path_dirty = false;
+                                let _ = tab.handle.commands.send(SftpCommand::ListDir { path });
+                            }
+                            remote_entry_context_menu(&cell_resp, tab, entry);
+                        });
+                        row.col(|ui| { ui.label(RichText::new(format_size(entry.size)).small().monospace()); });
+                        row.col(|ui| { ui.label(RichText::new(format_mtime(entry.modified)).small().monospace()); });
                     });
+                }
             });
-            if let Some(k) = clicked_header { toggle_sort(&mut tab.remote_sort, k); }
-            let w = ui.available_width();
-            let h = ui.available_height().max(PANE_EMPTY_MIN_H);
-            let empty = ui.allocate_response(egui::vec2(w, h), egui::Sense::click());
-            pane_empty_context_menu(&empty, tab, Pane::Remote);
-        });
+    });
+    if let Some(k) = clicked_header { toggle_sort(&mut tab.remote_sort, k); }
+    let remaining_h = ui.available_height();
+    if remaining_h > 0.0 {
+        let empty = ui.allocate_response(
+            egui::vec2(ui.available_width(), remaining_h),
+            egui::Sense::click(),
+        );
+        pane_empty_context_menu(&empty, tab, Pane::Remote);
+    }
     if ui.rect_contains_pointer(ui.max_rect()) && ui.input(|i| i.key_pressed(egui::Key::F5)) {
         refresh_pane(tab, Pane::Remote);
     }

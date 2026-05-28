@@ -1,6 +1,6 @@
 [package]
 name = "e-sh"
-version = "2.7.5"
+version = "2.7.6"
 edition = "2024"
 authors = ["chakyiu <lcyharry@hotmail.com>"]
 description = "A unified cross-platform remote connection manager (SSH, SFTP, RDP, VNC) built in Rust with egui."
@@ -11,16 +11,16 @@ readme = "README.md"
 build = "build.rs"
 
 [dependencies]
-eframe = { version = "0.34.2", default-features = false, features = [
+eframe = { version = "0.34.3", default-features = false, features = [
     "default_fonts",
     "glow",
     "persistence",
     "wayland",
     "x11",
 ] }
-egui = "0.34.2"
+egui = "0.34.3"
 egui_dock = "0.19"
-egui_extras = "0.34.2"
+egui_extras = "0.34.3"
 tokio = { version = "1.52.3", features = [
     "rt-multi-thread",
     "macros",
@@ -31,8 +31,8 @@ tokio = { version = "1.52.3", features = [
     "fs",
     "process",
 ] }
-russh = "0.60.3"
-russh-sftp = "2.1.2"
+russh = "0.61.1"
+russh-sftp = "2.3.0"
 alacritty_terminal = "0.26"
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
@@ -51,14 +51,14 @@ age = "0.11"
 base64 = "0.22"
 nucleo-matcher = "0.3"
 flate2 = "1"
-serde_json = "1"
+serde_json = "1.0.150"
 chrono = { version = "0.4", default-features = false, features = [
     "std",
     "clock",
     "serde",
 ] }
 image = { version = "0.25", default-features = false, features = ["png"] }
-reqwest = { version = "0.13.2", default-features = false, features = [
+reqwest = { version = "0.13.4", default-features = false, features = [
     "rustls",
     "json",
 ] }

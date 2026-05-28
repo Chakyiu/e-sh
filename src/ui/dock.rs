@@ -184,6 +184,18 @@ impl TabViewer for EshTabViewer {
         true
     }
 
+    /// Terminal / remote-desktop / SFTP tabs handle scrolling internally.
+    /// egui_dock's default `[true, true]` wraps every tab in a ScrollArea and
+    /// shows hover scrollbars that do nothing useful.
+    fn scroll_bars(&self, tab: &Self::Tab) -> [bool; 2] {
+        match tab {
+            EshTab::Terminal(_) | EshTab::Rdp(_) | EshTab::Vnc(_) | EshTab::Sftp(_) => {
+                [false, false]
+            }
+            EshTab::Recordings(_) | EshTab::Settings(_) => [true, true],
+        }
+    }
+
     fn on_add(&mut self, _path: NodePath) {
         self.add_local_tab_requested = true;
     }
