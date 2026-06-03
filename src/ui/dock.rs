@@ -2,6 +2,7 @@ use egui::{Color32, RichText, Ui, WidgetText};
 use egui_dock::{NodePath, TabStyle, TabViewer};
 use uuid::Uuid;
 
+use crate::config::shortcuts::AppShortcuts;
 use crate::proto::ssh::TunnelStatusKind;
 use crate::ui::recordings_view::{RecordingsAction, RecordingsTab, render_recordings_tab};
 use crate::ui::rdp_tab::{RdpTab, render_rdp_tab};
@@ -100,12 +101,24 @@ pub enum TabAction {
     Reconnect { tab_id: Uuid, source_connection: Uuid, is_sftp: bool },
 }
 
-#[derive(Default)]
 pub struct EshTabViewer {
     pub actions: Vec<TabAction>,
     pub recordings_action: Option<RecordingsAction>,
     pub settings_action: Option<SettingsAction>,
     pub add_local_tab_requested: bool,
+    pub shortcuts: std::sync::Arc<AppShortcuts>,
+}
+
+impl Default for EshTabViewer {
+    fn default() -> Self {
+        Self {
+            actions: Vec::new(),
+            recordings_action: None,
+            settings_action: None,
+            add_local_tab_requested: false,
+            shortcuts: std::sync::Arc::new(AppShortcuts::default()),
+        }
+    }
 }
 
 const TAB_COLOR_PRESETS: &[(&str, Color32)] = &[
@@ -139,7 +152,11 @@ impl TabViewer for EshTabViewer {
                     t.emulator.refresh_find_matches();
                 }
                 render_tunnel_strip(ui, t);
-                TerminalView { emulator: &mut t.emulator }.show(ui);
+                TerminalView {
+                    emulator: &mut t.emulator,
+                    shortcuts: &self.shortcuts,
+                }
+                .show(ui);
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
             }
             EshTab::Sftp(t) => {
@@ -168,7 +185,8 @@ impl TabViewer for EshTabViewer {
                 let has = act.toast_info.is_some()
                     || act.toast_warn.is_some()
                     || act.toast_error.is_some()
-                    || act.theme_changed;
+                    || act.theme_changed
+                    || act.shortcuts_changed;
                 if has {
                     self.settings_action = Some(act);
                 }

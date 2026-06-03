@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use egui::{Color32, RichText, ScrollArea, Ui};
 use uuid::Uuid;
 
+use crate::config::shortcuts::{AppShortcuts, ShortcutParseError};
 use crate::config::theme::{
     self, Theme, ThemeColors, builtin_themes, export_theme, import_theme,
     save_theme,
@@ -16,6 +17,8 @@ pub struct SettingsAction {
     pub toast_warn: Option<(String, String)>,
     pub toast_error: Option<(String, String)>,
     pub theme_changed: bool,
+    pub shortcuts_changed: bool,
+    pub shortcuts: Option<AppShortcuts>,
 }
 
 pub struct SettingsTab {
@@ -30,6 +33,9 @@ pub struct SettingsTab {
     pub recordings_dir: PathBuf,
     rec_store: ManifestStore,
     rec_error: Option<String>,
+    pub shortcuts: AppShortcuts,
+    shortcuts_error: Option<String>,
+    recording_slot: Option<ShortcutSlot>,
     // Section toggle
     active_section: SettingsSection,
 }
@@ -37,11 +43,27 @@ pub struct SettingsTab {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SettingsSection {
     Theme,
+    Shortcuts,
     Recordings,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShortcutSlot {
+    CommandPalette,
+    ToggleSidebar,
+    CloseTab,
+    Quit,
+    FindInTerminal,
+    ClearTerminal,
+}
+
 impl SettingsTab {
-    pub fn new(config_dir: PathBuf, recordings_dir: PathBuf, current_theme: Theme) -> Self {
+    pub fn new(
+        config_dir: PathBuf,
+        recordings_dir: PathBuf,
+        current_theme: Theme,
+        shortcuts: AppShortcuts,
+    ) -> Self {
         let custom_edit = current_theme.colors.clone();
         let mut tab = Self {
             id: Uuid::new_v4(),
@@ -53,6 +75,9 @@ impl SettingsTab {
             recordings_dir,
             rec_store: ManifestStore::default(),
             rec_error: None,
+            shortcuts,
+            shortcuts_error: None,
+            recording_slot: None,
             active_section: SettingsSection::Theme,
         };
         tab.reload_recordings();
@@ -91,6 +116,15 @@ pub fn render_settings_tab(ui: &mut Ui, tab: &mut SettingsTab) -> SettingsAction
         }
         if ui
             .selectable_label(
+                tab.active_section == SettingsSection::Shortcuts,
+                "⌨ Shortcuts",
+            )
+            .clicked()
+        {
+            tab.active_section = SettingsSection::Shortcuts;
+        }
+        if ui
+            .selectable_label(
                 tab.active_section == SettingsSection::Recordings,
                 "⏺ Recordings",
             )
@@ -103,6 +137,7 @@ pub fn render_settings_tab(ui: &mut Ui, tab: &mut SettingsTab) -> SettingsAction
 
     match tab.active_section {
         SettingsSection::Theme => render_theme_section(ui, tab, &mut action),
+        SettingsSection::Shortcuts => render_shortcuts_section(ui, tab, &mut action),
         SettingsSection::Recordings => render_recordings_section(ui, tab, &mut action),
     }
 
@@ -388,6 +423,286 @@ fn get_color_mut<'a>(colors: &'a mut ThemeColors, field: &str) -> &'a mut [u8; 3
 }
 
 // ── Recordings section ─────────────────────────────────────────────────
+
+// ── Shortcuts section ──────────────────────────────────────────────────
+
+fn render_shortcuts_section(ui: &mut Ui, tab: &mut SettingsTab, action: &mut SettingsAction) {
+    ScrollArea::vertical()
+        .auto_shrink([false; 2])
+        .show(ui, |ui| {
+            ui.add_space(4.0);
+            ui.label(RichText::new("Keyboard shortcuts").strong());
+            ui.label(
+                RichText::new(
+                    "Use modifier+key format (e.g. cmd+shift+p, ctrl+k). \
+                     Terminal-only shortcuts apply when the SSH tab has focus.",
+                )
+                .weak()
+                .small(),
+            );
+            ui.add_space(8.0);
+
+            if let Some(err) = &tab.shortcuts_error {
+                ui.colored_label(Color32::from_rgb(210, 90, 90), err);
+            }
+
+            if tab.recording_slot.is_some() {
+                ui.colored_label(
+                    Color32::from_rgb(220, 180, 60),
+                    "Press a key combination now (Escape to cancel)…",
+                );
+                capture_shortcut_keypress(ui, tab);
+            }
+
+            egui::Grid::new("shortcuts_grid")
+                .num_columns(3)
+                .spacing([12.0, 8.0])
+                .show(ui, |ui| {
+                    shortcut_row(
+                        ui,
+                        "Command palette",
+                        ShortcutSlot::CommandPalette,
+                        &mut tab.shortcuts.command_palette,
+                        &mut tab.recording_slot,
+                        &mut tab.shortcuts_error,
+                    );
+                    shortcut_row(
+                        ui,
+                        "Toggle sidebar",
+                        ShortcutSlot::ToggleSidebar,
+                        &mut tab.shortcuts.toggle_sidebar,
+                        &mut tab.recording_slot,
+                        &mut tab.shortcuts_error,
+                    );
+                    shortcut_row(
+                        ui,
+                        "Close active tab",
+                        ShortcutSlot::CloseTab,
+                        &mut tab.shortcuts.close_tab,
+                        &mut tab.recording_slot,
+                        &mut tab.shortcuts_error,
+                    );
+                    shortcut_row(
+                        ui,
+                        "Quit",
+                        ShortcutSlot::Quit,
+                        &mut tab.shortcuts.quit,
+                        &mut tab.recording_slot,
+                        &mut tab.shortcuts_error,
+                    );
+                    shortcut_row(
+                        ui,
+                        "Find in terminal",
+                        ShortcutSlot::FindInTerminal,
+                        &mut tab.shortcuts.find_in_terminal,
+                        &mut tab.recording_slot,
+                        &mut tab.shortcuts_error,
+                    );
+                    shortcut_row(
+                        ui,
+                        "Clear terminal",
+                        ShortcutSlot::ClearTerminal,
+                        &mut tab.shortcuts.clear_terminal,
+                        &mut tab.recording_slot,
+                        &mut tab.shortcuts_error,
+                    );
+                });
+
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if ui.button("Save shortcuts").clicked() {
+                    match tab.shortcuts.save(&tab.config_dir) {
+                        Ok(()) => {
+                            tab.shortcuts_error = None;
+                            action.shortcuts_changed = true;
+                            action.shortcuts = Some(tab.shortcuts.clone());
+                            action.toast_info = Some((
+                                "Shortcuts saved".into(),
+                                "New bindings take effect immediately.".into(),
+                            ));
+                        }
+                        Err(e) => {
+                            tab.shortcuts_error = Some(e.to_string());
+                        }
+                    }
+                }
+                if ui.button("Reset to defaults").clicked() {
+                    tab.shortcuts = AppShortcuts::default();
+                    tab.shortcuts_error = None;
+                    tab.recording_slot = None;
+                }
+            });
+        });
+}
+
+fn shortcut_row(
+    ui: &mut Ui,
+    label: &str,
+    slot: ShortcutSlot,
+    binding: &mut String,
+    recording_slot: &mut Option<ShortcutSlot>,
+    shortcuts_error: &mut Option<String>,
+) {
+    ui.label(label);
+    let preview = AppShortcuts::display_label(binding);
+    ui.label(RichText::new(preview).monospace().weak());
+    ui.horizontal(|ui| {
+        let resp = ui.add(
+            egui::TextEdit::singleline(binding)
+                .desired_width(160.0)
+                .font(egui::TextStyle::Monospace),
+        );
+        if resp.changed() {
+            *shortcuts_error = match AppShortcuts::validate_binding(binding) {
+                Ok(()) => None,
+                Err(ShortcutParseError(msg)) => Some(format!("Invalid shortcut {msg:?}")),
+            };
+        }
+        let recording = *recording_slot == Some(slot);
+        if ui
+            .selectable_label(recording, if recording { "…" } else { "Set" })
+            .clicked()
+        {
+            *recording_slot = Some(slot);
+            *shortcuts_error = None;
+        }
+    });
+    ui.end_row();
+}
+
+fn capture_shortcut_keypress(ui: &mut Ui, tab: &mut SettingsTab) {
+    let slot = match tab.recording_slot {
+        Some(s) => s,
+        None => return,
+    };
+
+    let events = ui.input(|i| i.events.clone());
+    for ev in events {
+        let egui::Event::Key {
+            key,
+            pressed: true,
+            modifiers,
+            ..
+        } = ev
+        else {
+            continue;
+        };
+
+        if key == egui::Key::Escape {
+            tab.recording_slot = None;
+            return;
+        }
+
+        if modifiers.is_none() {
+            continue;
+        }
+
+        let binding = format_binding(modifiers, key);
+        if AppShortcuts::validate_binding(&binding).is_err() {
+            continue;
+        }
+
+        match slot {
+        ShortcutSlot::CommandPalette => tab.shortcuts.command_palette = binding,
+        ShortcutSlot::ToggleSidebar => tab.shortcuts.toggle_sidebar = binding,
+        ShortcutSlot::CloseTab => tab.shortcuts.close_tab = binding,
+        ShortcutSlot::Quit => tab.shortcuts.quit = binding,
+        ShortcutSlot::FindInTerminal => tab.shortcuts.find_in_terminal = binding,
+        ShortcutSlot::ClearTerminal => tab.shortcuts.clear_terminal = binding,
+        }
+        tab.recording_slot = None;
+        return;
+    }
+}
+
+fn format_binding(mods: egui::Modifiers, key: egui::Key) -> String {
+    let mut parts = Vec::new();
+    if mods.command || mods.mac_cmd {
+        parts.push("cmd");
+    }
+    if mods.ctrl {
+        parts.push("ctrl");
+    }
+    if mods.shift {
+        parts.push("shift");
+    }
+    if mods.alt {
+        parts.push("alt");
+    }
+    let key_name = key_to_name(key);
+    parts.push(key_name.as_str());
+    parts.join("+")
+}
+
+fn key_to_name(key: egui::Key) -> String {
+    use egui::Key::*;
+    match key {
+        A => "a",
+        B => "b",
+        C => "c",
+        D => "d",
+        E => "e",
+        F => "f",
+        G => "g",
+        H => "h",
+        I => "i",
+        J => "j",
+        K => "k",
+        L => "l",
+        M => "m",
+        N => "n",
+        O => "o",
+        P => "p",
+        Q => "q",
+        R => "r",
+        S => "s",
+        T => "t",
+        U => "u",
+        V => "v",
+        W => "w",
+        X => "x",
+        Y => "y",
+        Z => "z",
+        Num0 => "0",
+        Num1 => "1",
+        Num2 => "2",
+        Num3 => "3",
+        Num4 => "4",
+        Num5 => "5",
+        Num6 => "6",
+        Num7 => "7",
+        Num8 => "8",
+        Num9 => "9",
+        F1 => "f1",
+        F2 => "f2",
+        F3 => "f3",
+        F4 => "f4",
+        F5 => "f5",
+        F6 => "f6",
+        F7 => "f7",
+        F8 => "f8",
+        F9 => "f9",
+        F10 => "f10",
+        F11 => "f11",
+        F12 => "f12",
+        Space => "space",
+        Tab => "tab",
+        Enter => "enter",
+        Escape => "escape",
+        Backspace => "backspace",
+        Delete => "delete",
+        Home => "home",
+        End => "end",
+        PageUp => "pageup",
+        PageDown => "pagedown",
+        ArrowUp => "arrowup",
+        ArrowDown => "arrowdown",
+        ArrowLeft => "arrowleft",
+        ArrowRight => "arrowright",
+        _ => return format!("{key:?}").trim_start_matches("Key::").to_ascii_lowercase(),
+    }
+    .to_string()
+}
 
 fn render_recordings_section(ui: &mut Ui, tab: &mut SettingsTab, action: &mut SettingsAction) {
     ui.horizontal(|ui| {

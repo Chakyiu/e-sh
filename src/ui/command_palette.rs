@@ -19,6 +19,8 @@ pub enum Command {
     ToggleSidebar,
     LockSecrets,
     FindInTerminal,
+    ClearTerminal,
+    OpenCommandPalette,
     OpenRecordings,
     OpenSettings,
     Quit,

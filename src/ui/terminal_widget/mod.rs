@@ -9,7 +9,7 @@ use alacritty_terminal::event::{Event as TermEvent, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
-use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
@@ -208,6 +208,37 @@ impl TerminalEmulator {
 
     pub fn scroll_to_bottom(&mut self) {
         self.term.lock().scroll_display(Scroll::Bottom);
+    }
+
+    /// Clear scrollback and on-screen history, keeping the cursor row (prompt) at the top.
+    /// Does not send bytes to the PTY (Terminal.app-style clear).
+    pub fn clear_scrollback(&mut self) {
+        let mut term = self.term.lock();
+        let cursor_point = term.grid().cursor.point;
+        let cols = term.columns();
+        let screen_lines = term.screen_lines() as i32;
+
+        let cursor_row: Vec<Cell> = (0..cols)
+            .map(|c| term.grid()[cursor_point.line][Column(c)].clone())
+            .collect();
+
+        term.grid_mut().clear_history();
+
+        for line in 0..screen_lines {
+            term.grid_mut()
+                .reset_region(Line(line)..Line(line + 1));
+        }
+
+        let top = Line(0);
+        for (c, cell) in cursor_row.into_iter().enumerate() {
+            term.grid_mut()[top][Column(c)] = cell;
+        }
+
+        term.grid_mut().cursor.point = Point::new(top, cursor_point.column);
+        term.grid_mut().cursor.input_needs_wrap = false;
+        term.scroll_display(Scroll::Bottom);
+        term.selection = None;
+        self.find.close();
     }
 
     pub fn begin_selection(&mut self, line: i32, col: usize, side: Side) {

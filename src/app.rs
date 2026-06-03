@@ -1,6 +1,6 @@
 use age::secrecy::SecretString;
 use eframe::{App, CreationContext, Frame};
-use egui::{CentralPanel, Key, KeyboardShortcut, Modifiers, Panel, Ui};
+use egui::{CentralPanel, Panel, Ui};
 use egui_dock::{DockArea, DockState, Style, TabAddAlign};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
@@ -14,6 +14,7 @@ use e_sh::config::secrets::SecretStore;
 use e_sh::config::store::{
     ConfigPaths, forget_secrets, hydrate_after_unlock, load_connections, save_connections,
 };
+use e_sh::config::shortcuts::AppShortcuts;
 use e_sh::config::theme::{Theme, apply_theme, load_theme};
 use e_sh::updater::{self, UpdateHandle, UpdateStatus};
 use e_sh::core::connection::{AuthMethod, Connection, ConnectionStore, Protocol};
@@ -88,6 +89,7 @@ pub struct EshApp {
     current_theme: Theme,
     /// Whether the theme has been applied to the egui context at least once.
     theme_applied: bool,
+    shortcuts: Arc<AppShortcuts>,
 }
 
 impl EshApp {
@@ -95,6 +97,7 @@ impl EshApp {
         let paths = Arc::new(ConfigPaths::discover().expect("config paths"));
         let update_handle = updater::spawn_update_check(&rt);
         let current_theme = load_theme(&paths.config_dir);
+        let shortcuts = Arc::new(AppShortcuts::load(&paths.config_dir));
         let mut store = load_connections(&paths).unwrap_or_else(|e| {
             tracing::warn!(error = %e, "failed loading connections, starting empty");
             ConnectionStore::default()
@@ -131,7 +134,10 @@ impl EshApp {
             host_key_prompt_rx,
             pending_host_key_prompts: VecDeque::new(),
             dock: DockState::new(Vec::new()),
-            viewer: EshTabViewer::default(),
+            viewer: EshTabViewer {
+                shortcuts: Arc::clone(&shortcuts),
+                ..EshTabViewer::default()
+            },
             status: "Ready".to_string(),
             editor: None,
             toaster: Toaster::default(),
@@ -149,6 +155,7 @@ impl EshApp {
             apply_handle: None,
             current_theme,
             theme_applied: false,
+            shortcuts,
         }
     }
 
@@ -496,13 +503,13 @@ impl EshApp {
                 "Show sidebar".to_string()
             },
             detail: "Toggle the connection tree".to_string(),
-            hint: "\u{2318}B".to_string(),
+            hint: AppShortcuts::display_label(&self.shortcuts.toggle_sidebar),
         });
         items.push(CommandItem {
             command: Command::CloseActiveTab,
             label: "Close active tab".to_string(),
             detail: "Close the currently focused session".to_string(),
-            hint: "\u{2318}W".to_string(),
+            hint: AppShortcuts::display_label(&self.shortcuts.close_tab),
         });
         items.push(CommandItem {
             command: Command::LockSecrets,
@@ -521,14 +528,26 @@ impl EshApp {
                 command: Command::FindInTerminal,
                 label: "Find in terminal".to_string(),
                 detail: "Search scrollback of the active terminal".to_string(),
-                hint: "\u{2318}F".to_string(),
+                hint: AppShortcuts::display_label(&self.shortcuts.find_in_terminal),
+            });
+            items.push(CommandItem {
+                command: Command::ClearTerminal,
+                label: "Clear terminal".to_string(),
+                detail: "Clear scrollback and screen of the active terminal".to_string(),
+                hint: AppShortcuts::display_label(&self.shortcuts.clear_terminal),
             });
         }
         items.push(CommandItem {
             command: Command::Quit,
             label: "Quit e-sh".to_string(),
             detail: "Close the application".to_string(),
-            hint: "\u{2318}Q".to_string(),
+            hint: AppShortcuts::display_label(&self.shortcuts.quit),
+        });
+        items.push(CommandItem {
+            command: Command::OpenCommandPalette,
+            label: "Command palette".to_string(),
+            detail: "Fuzzy search commands and connections".to_string(),
+            hint: AppShortcuts::display_label(&self.shortcuts.command_palette),
         });
 
         for (_, tab) in self.dock.iter_all_tabs() {
@@ -631,6 +650,13 @@ impl EshApp {
                     tab.emulator.open_find();
                 }
             }
+            Command::ClearTerminal => {
+                if let Some(tab) = self.active_terminal_tab_mut() {
+                    tab.emulator.clear_scrollback();
+                    self.status = "Terminal cleared".into();
+                }
+            }
+            Command::OpenCommandPalette => self.palette.toggle(),
             Command::OpenRecordings => self.open_recordings_tab(),
             Command::OpenSettings => self.open_settings_tab(),
             Command::Quit => {
@@ -682,6 +708,7 @@ impl EshApp {
             self.paths.config_dir.clone(),
             self.paths.recordings_dir.clone(),
             self.current_theme.clone(),
+            (*self.shortcuts).clone(),
         );
         self.push_tab(EshTab::Settings(tab));
         self.status = "Opened settings".to_string();
@@ -970,18 +997,19 @@ impl App for EshApp {
             self.theme_applied = true;
         }
 
-        let palette_primary = KeyboardShortcut::new(Modifiers::COMMAND, Key::K);
-        let palette_alt = KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::P);
-        let toggle_sidebar = KeyboardShortcut::new(Modifiers::COMMAND, Key::B);
-        let close_tab = KeyboardShortcut::new(Modifiers::COMMAND, Key::W);
-        let quit_shortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Q);
+        self.viewer.shortcuts = Arc::clone(&self.shortcuts);
+
+        let palette_sc = self.shortcuts.command_palette_shortcut();
+        let toggle_sidebar_sc = self.shortcuts.toggle_sidebar_shortcut();
+        let close_tab_sc = self.shortcuts.close_tab_shortcut();
+        let quit_shortcut_sc = self.shortcuts.quit_shortcut();
 
         let (open_palette, toggle_sb, close_t, quit_now) = ctx.input_mut(|i| {
             (
-                i.consume_shortcut(&palette_primary) || i.consume_shortcut(&palette_alt),
-                i.consume_shortcut(&toggle_sidebar),
-                i.consume_shortcut(&close_tab),
-                i.consume_shortcut(&quit_shortcut),
+                i.consume_shortcut(&palette_sc),
+                i.consume_shortcut(&toggle_sidebar_sc),
+                i.consume_shortcut(&close_tab_sc),
+                i.consume_shortcut(&quit_shortcut_sc),
             )
         });
         if open_palette {
@@ -1298,6 +1326,12 @@ impl App for EshApp {
             }
             if let Some((title, body)) = act.toast_error {
                 self.toaster.error(title, body);
+            }
+            if act.shortcuts_changed {
+                if let Some(shortcuts) = act.shortcuts {
+                    self.shortcuts = Arc::new(shortcuts);
+                    self.viewer.shortcuts = Arc::clone(&self.shortcuts);
+                }
             }
         }
 

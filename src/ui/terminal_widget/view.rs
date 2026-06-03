@@ -4,10 +4,13 @@ use egui::{
     Order, Pos2, Rect, Sense, Stroke, TextEdit, TextStyle, Ui, Vec2,
 };
 
+use crate::config::shortcuts::AppShortcuts;
+
 use super::TerminalEmulator;
 
 pub struct TerminalView<'a> {
     pub emulator: &'a mut TerminalEmulator,
+    pub shortcuts: &'a AppShortcuts,
 }
 
 impl<'a> TerminalView<'a> {
@@ -283,9 +286,14 @@ impl<'a> TerminalView<'a> {
             }
         }
 
-        let open_sc = egui::KeyboardShortcut::new(Modifiers::COMMAND, Key::F);
-        if response.has_focus() && ui.ctx().input_mut(|i| i.consume_shortcut(&open_sc)) {
+        let find_sc = self.shortcuts.find_in_terminal_shortcut();
+        if response.has_focus() && ui.ctx().input_mut(|i| i.consume_shortcut(&find_sc)) {
             self.emulator.open_find();
+        }
+
+        let clear_sc = self.shortcuts.clear_terminal_shortcut();
+        if response.has_focus() && ui.ctx().input_mut(|i| i.consume_shortcut(&clear_sc)) {
+            self.emulator.clear_scrollback();
         }
 
         if self.emulator.find.open {
