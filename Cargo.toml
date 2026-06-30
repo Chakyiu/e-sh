@@ -20,7 +20,7 @@ eframe = { version = "0.34.3", default-features = false, features = [
 ] }
 egui = "0.34.3"
 egui_dock = "0.19"
-egui_extras = "0.34.3"
+egui_extras = "0.35.0"
 tokio = { version = "1.52.3", features = [
     "rt-multi-thread",
     "macros",
