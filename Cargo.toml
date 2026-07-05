@@ -1,6 +1,6 @@
 [package]
 name = "e-sh"
-version = "2.7.7"
+version = "2.7.8"
 edition = "2024"
 authors = ["chakyiu <lcyharry@hotmail.com>"]
 description = "A unified cross-platform remote connection manager (SSH, SFTP, RDP, VNC) built in Rust with egui."
@@ -11,16 +11,16 @@ readme = "README.md"
 build = "build.rs"
 
 [dependencies]
-eframe = { version = "0.34.3", default-features = false, features = [
+eframe = { version = "0.35.0", default-features = false, features = [
     "default_fonts",
     "glow",
     "persistence",
     "wayland",
     "x11",
 ] }
-egui = "0.34.3"
-egui_dock = "0.19"
-egui_extras = "0.34.3"
+egui = "0.35.0"
+egui_dock = "0.20.1"
+egui_extras = "0.35.0"
 tokio = { version = "1.52.3", features = [
     "rt-multi-thread",
     "macros",
@@ -31,13 +31,13 @@ tokio = { version = "1.52.3", features = [
     "fs",
     "process",
 ] }
-russh = "0.61.1"
+russh = "0.62.1"
 russh-sftp = "2.3.0"
 alacritty_terminal = "0.26"
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
 directories = "6"
-anyhow = "1"
+anyhow = "1.0.103"
 des = "0.9"
 thiserror = "2"
 tracing = "0.1"
@@ -52,7 +52,7 @@ base64 = "0.22"
 nucleo-matcher = "0.3"
 flate2 = "1"
 serde_json = "1.0.150"
-chrono = { version = "0.4", default-features = false, features = [
+chrono = { version = "0.4.45", default-features = false, features = [
     "std",
     "clock",
     "serde",
@@ -63,7 +63,7 @@ reqwest = { version = "0.13.4", default-features = false, features = [
     "json",
 ] }
 semver = "1"
-open = "5.3.5"
+open = "5.3.6"
 tar = "0.4.46"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 arboard = "3.6"
@@ -72,7 +72,7 @@ arboard = "3.6"
 tempfile = "3"
 
 [target.'cfg(windows)'.build-dependencies]
-embed-resource = "3"
+embed-resource = "3.0.11"
 ico = "0.5"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
