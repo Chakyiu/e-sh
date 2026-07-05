@@ -1,3 +1,4 @@
+use egui::text::CharIndex;
 use egui::TextBuffer;
 
 const MASK: char = '\u{2022}';
@@ -23,7 +24,8 @@ impl<'a> TextBuffer for MaskedBuffer<'a> {
         &self.display
     }
 
-    fn insert_text(&mut self, text: &str, char_index: usize) -> usize {
+    fn insert_text(&mut self, text: &str, char_index: CharIndex) -> usize {
+        let char_index = char_index.0;
         let inserted = text.chars().count();
 
         let secret_byte = byte_index_for_char(self.secret, char_index);
@@ -36,7 +38,8 @@ impl<'a> TextBuffer for MaskedBuffer<'a> {
         inserted
     }
 
-    fn delete_char_range(&mut self, char_range: std::ops::Range<usize>) {
+    fn delete_char_range(&mut self, char_range: std::ops::Range<CharIndex>) {
+        let char_range = char_range.start.0..char_range.end.0;
         let s_start = byte_index_for_char(self.secret, char_range.start);
         let s_end = byte_index_for_char(self.secret, char_range.end);
         self.secret.replace_range(s_start..s_end, "");

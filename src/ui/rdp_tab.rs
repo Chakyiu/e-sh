@@ -1,10 +1,11 @@
 //! RDP viewer tab — renders the remote desktop as an egui texture
 //! and forwards mouse/keyboard input to the RDP session.
 
-use egui::{Color32, ColorImage, RichText, TextureHandle, TextureOptions, Ui};
+use egui::{Color32, RichText, Ui};
 use uuid::Uuid;
 
 use crate::proto::rdp::{RdpCommand, RdpEvent, RdpHandle, RdpMouseButton};
+use crate::ui::remote_framebuffer::RemoteFramebuffer;
 
 pub struct RdpTab {
     pub id: Uuid,
@@ -18,17 +19,15 @@ pub struct RdpTab {
 
     width: u16,
     height: u16,
-    connected: bool,
+    pub connected: bool,
     /// When true, the desktop is displayed in a separate FreeRDP window
     /// and this tab only shows status information.
     external_window: bool,
-    /// RGBA framebuffer, composited from bitmap regions.
-    framebuffer: Vec<u8>,
-    texture: Option<TextureHandle>,
-    dirty: bool,
+    framebuffer: RemoteFramebuffer,
     status: String,
     /// Track modifier key state so we can send press/release on change.
     prev_modifiers: egui::Modifiers,
+    last_mouse: Option<(u16, u16)>,
 }
 
 impl RdpTab {
@@ -52,16 +51,17 @@ impl RdpTab {
             height: 0,
             connected: false,
             external_window: false,
-            framebuffer: Vec::new(),
-            texture: None,
-            dirty: false,
+            framebuffer: RemoteFramebuffer::new(format!("rdp_{id}")),
             status: "Connecting...".to_string(),
             prev_modifiers: egui::Modifiers::NONE,
+            last_mouse: None,
         }
     }
 
-    pub fn pump(&mut self) {
+    pub fn pump(&mut self) -> bool {
+        let mut updated = false;
         while let Ok(ev) = self.handle.events.try_recv() {
+            updated = true;
             match ev {
                 RdpEvent::Connected { width, height, external_window } => {
                     self.width = width;
@@ -71,27 +71,35 @@ impl RdpTab {
                     if external_window {
                         self.status = "Connected (FreeRDP — desktop in separate window)".to_string();
                     } else {
-                        self.framebuffer = vec![0u8; width as usize * height as usize * 4];
-                        // Fill with dark gray
-                        for pixel in self.framebuffer.chunks_exact_mut(4) {
-                            pixel[0] = 30;
-                            pixel[1] = 30;
-                            pixel[2] = 30;
-                            pixel[3] = 255;
-                        }
-                        self.dirty = true;
                         self.status = format!("Connected {}x{}", width, height);
                     }
                 }
                 RdpEvent::Bitmap(region) => {
                     self.blit_region(&region);
-                    self.dirty = true;
                 }
                 RdpEvent::Closed(reason) => {
                     self.closed = Some(reason.unwrap_or_else(|| "session closed".into()));
                     self.status = "Disconnected".to_string();
                 }
             }
+        }
+        updated
+    }
+
+    fn ensure_framebuffer(&mut self, ctx: &egui::Context) {
+        if self.external_window || self.width == 0 || self.height == 0 {
+            return;
+        }
+        if self.framebuffer.width() != self.width || self.framebuffer.height() != self.height {
+            self.framebuffer
+                .resize(self.width, self.height, ctx);
+            for pixel in self.framebuffer.pixels_mut().chunks_exact_mut(4) {
+                pixel[0] = 30;
+                pixel[1] = 30;
+                pixel[2] = 30;
+                pixel[3] = 255;
+            }
+            self.framebuffer.mark_all_dirty();
         }
     }
 
@@ -103,12 +111,13 @@ impl RdpTab {
         let rx = region.left as usize;
         let ry = region.top as usize;
 
-        if self.framebuffer.len() != fb_w * fb_h * 4 {
+        if self.framebuffer.pixels().len() != fb_w * fb_h * 4 {
             return;
         }
 
         let src_bpp = region.bpp as usize;
         let src_bytes_per_pixel = src_bpp / 8;
+        let pixels = self.framebuffer.pixels_mut();
 
         for row in 0..rh {
             let dst_y = ry + row;
@@ -126,24 +135,24 @@ impl RdpTab {
                 if src_idx + src_bytes_per_pixel > region.data.len() {
                     break;
                 }
-                if dst_idx + 4 > self.framebuffer.len() {
+                if dst_idx + 4 > pixels.len() {
                     break;
                 }
 
                 match src_bpp {
                     32 => {
                         // BGRA -> RGBA
-                        self.framebuffer[dst_idx] = region.data[src_idx + 2];
-                        self.framebuffer[dst_idx + 1] = region.data[src_idx + 1];
-                        self.framebuffer[dst_idx + 2] = region.data[src_idx];
-                        self.framebuffer[dst_idx + 3] = 255;
+                        pixels[dst_idx] = region.data[src_idx + 2];
+                        pixels[dst_idx + 1] = region.data[src_idx + 1];
+                        pixels[dst_idx + 2] = region.data[src_idx];
+                        pixels[dst_idx + 3] = 255;
                     }
                     24 => {
                         // BGR -> RGBA
-                        self.framebuffer[dst_idx] = region.data[src_idx + 2];
-                        self.framebuffer[dst_idx + 1] = region.data[src_idx + 1];
-                        self.framebuffer[dst_idx + 2] = region.data[src_idx];
-                        self.framebuffer[dst_idx + 3] = 255;
+                        pixels[dst_idx] = region.data[src_idx + 2];
+                        pixels[dst_idx + 1] = region.data[src_idx + 1];
+                        pixels[dst_idx + 2] = region.data[src_idx];
+                        pixels[dst_idx + 3] = 255;
                     }
                     16 => {
                         let pixel = u16::from_le_bytes([
@@ -154,10 +163,10 @@ impl RdpTab {
                         let r = ((pixel >> 11) & 0x1F) as u8;
                         let g = ((pixel >> 5) & 0x3F) as u8;
                         let b = (pixel & 0x1F) as u8;
-                        self.framebuffer[dst_idx] = (r << 3) | (r >> 2);
-                        self.framebuffer[dst_idx + 1] = (g << 2) | (g >> 4);
-                        self.framebuffer[dst_idx + 2] = (b << 3) | (b >> 2);
-                        self.framebuffer[dst_idx + 3] = 255;
+                        pixels[dst_idx] = (r << 3) | (r >> 2);
+                        pixels[dst_idx + 1] = (g << 2) | (g >> 4);
+                        pixels[dst_idx + 2] = (b << 3) | (b >> 2);
+                        pixels[dst_idx + 3] = 255;
                     }
                     15 => {
                         let pixel = u16::from_le_bytes([
@@ -168,26 +177,38 @@ impl RdpTab {
                         let r = ((pixel >> 10) & 0x1F) as u8;
                         let g = ((pixel >> 5) & 0x1F) as u8;
                         let b = (pixel & 0x1F) as u8;
-                        self.framebuffer[dst_idx] = (r << 3) | (r >> 2);
-                        self.framebuffer[dst_idx + 1] = (g << 3) | (g >> 2);
-                        self.framebuffer[dst_idx + 2] = (b << 3) | (b >> 2);
-                        self.framebuffer[dst_idx + 3] = 255;
+                        pixels[dst_idx] = (r << 3) | (r >> 2);
+                        pixels[dst_idx + 1] = (g << 3) | (g >> 2);
+                        pixels[dst_idx + 2] = (b << 3) | (b >> 2);
+                        pixels[dst_idx + 3] = 255;
                     }
                     _ => {
                         // Unknown bpp, fill magenta
-                        self.framebuffer[dst_idx] = 255;
-                        self.framebuffer[dst_idx + 1] = 0;
-                        self.framebuffer[dst_idx + 2] = 255;
-                        self.framebuffer[dst_idx + 3] = 255;
+                        pixels[dst_idx] = 255;
+                        pixels[dst_idx + 1] = 0;
+                        pixels[dst_idx + 2] = 255;
+                        pixels[dst_idx + 3] = 255;
                     }
                 }
             }
         }
+
+        self.framebuffer.mark_dirty_rect(
+            region.left as u32,
+            region.top as u32,
+            region.width as u32,
+            region.height as u32,
+        );
     }
 }
 
 pub fn render_rdp_tab(ui: &mut Ui, tab: &mut RdpTab) {
-    tab.pump();
+    let frame_updated = tab.pump();
+    if frame_updated {
+        ui.ctx().request_repaint();
+    }
+
+    tab.ensure_framebuffer(ui.ctx());
 
     // Status bar
     ui.horizontal(|ui| {
@@ -238,24 +259,11 @@ pub fn render_rdp_tab(ui: &mut Ui, tab: &mut RdpTab) {
         return;
     }
 
-    // Update texture if framebuffer changed
-    if tab.dirty && !tab.framebuffer.is_empty() {
-        let image = ColorImage::from_rgba_unmultiplied(
-            [tab.width as usize, tab.height as usize],
-            &tab.framebuffer,
-        );
-        match &mut tab.texture {
-            Some(tex) => tex.set(image, TextureOptions::NEAREST),
-            None => {
-                tab.texture =
-                    Some(ui.ctx().load_texture("rdp_fb", image, TextureOptions::NEAREST));
-            }
-        }
-        tab.dirty = false;
-    }
+    // Upload only dirty tiles to the GPU
+    tab.framebuffer.upload_dirty(ui.ctx());
 
     // Render the framebuffer
-    if let Some(tex) = &tab.texture {
+    if !tab.framebuffer.is_empty() {
         let available = ui.available_size();
         let fb_w = tab.width as f32;
         let fb_h = tab.height as f32;
@@ -276,12 +284,7 @@ pub fn render_rdp_tab(ui: &mut Ui, tab: &mut RdpTab) {
             egui::vec2(display_w, display_h),
         );
 
-        painter.image(
-            tex.id(),
-            img_rect,
-            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-            Color32::WHITE,
-        );
+        tab.framebuffer.paint(&painter, img_rect);
 
         // Forward mouse input
         //
@@ -290,13 +293,19 @@ pub fn render_rdp_tab(ui: &mut Ui, tab: &mut RdpTab) {
         // pointer button state from raw input events and send discrete
         // press / release messages to the RDP session.
 
-        // Hover position — always send mouse moves when the pointer is over the image
+        // Hover position — send mouse moves only when coordinates change
         let hover_pos = response.hover_pos();
         if let Some(pos) = hover_pos {
             if img_rect.contains(pos) {
                 let rel_x = ((pos.x - img_rect.min.x) / scale).clamp(0.0, fb_w - 1.0) as u16;
                 let rel_y = ((pos.y - img_rect.min.y) / scale).clamp(0.0, fb_h - 1.0) as u16;
-                let _ = tab.handle.commands.send(RdpCommand::MouseMove { x: rel_x, y: rel_y });
+                if tab.last_mouse != Some((rel_x, rel_y)) {
+                    tab.last_mouse = Some((rel_x, rel_y));
+                    let _ = tab
+                        .handle
+                        .commands
+                        .send(RdpCommand::MouseMove { x: rel_x, y: rel_y });
+                }
             }
         }
 

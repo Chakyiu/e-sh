@@ -5,6 +5,7 @@ pub mod edit_dialog;
 pub mod host_key_prompt;
 pub mod master_password_prompt;
 pub mod password_field;
+pub mod remote_framebuffer;
 pub mod rdp_tab;
 pub mod recordings_view;
 pub mod settings_tab;

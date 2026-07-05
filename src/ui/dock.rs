@@ -165,11 +165,15 @@ impl TabViewer for EshTabViewer {
             }
             EshTab::Rdp(t) => {
                 render_rdp_tab(ui, t);
-                ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+                if t.connected && t.closed.is_none() {
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
+                }
             }
             EshTab::Vnc(t) => {
                 render_vnc_tab(ui, t);
-                ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+                if t.connected && t.closed.is_none() {
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
+                }
             }
             EshTab::Recordings(t) => {
                 let act = render_recordings_tab(ui, t);

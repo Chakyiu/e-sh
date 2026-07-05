@@ -1,10 +1,11 @@
 //! VNC viewer tab — renders the remote desktop as an egui texture
 //! and forwards mouse/keyboard input to the VNC session.
 
-use egui::{Color32, ColorImage, RichText, TextureHandle, TextureOptions, Ui};
+use egui::{Color32, RichText, Ui};
 use uuid::Uuid;
 
 use crate::proto::vnc::{VncCommand, VncEvent, VncHandle};
+use crate::ui::remote_framebuffer::RemoteFramebuffer;
 
 pub struct VncTab {
     pub id: Uuid,
@@ -18,12 +19,11 @@ pub struct VncTab {
 
     width: u16,
     height: u16,
-    connected: bool,
-    framebuffer: Vec<u8>,
-    texture: Option<TextureHandle>,
-    dirty: bool,
+    pub connected: bool,
+    framebuffer: RemoteFramebuffer,
     status: String,
     prev_modifiers: egui::Modifiers,
+    last_pointer: Option<(u16, u16, u8)>,
 }
 
 impl VncTab {
@@ -46,40 +46,49 @@ impl VncTab {
             width: 0,
             height: 0,
             connected: false,
-            framebuffer: Vec::new(),
-            texture: None,
-            dirty: false,
+            framebuffer: RemoteFramebuffer::new(format!("vnc_{id}")),
             status: "Connecting...".to_string(),
             prev_modifiers: egui::Modifiers::NONE,
+            last_pointer: None,
         }
     }
 
-    pub fn pump(&mut self) {
+    pub fn pump(&mut self) -> bool {
+        let mut updated = false;
         while let Ok(ev) = self.handle.events.try_recv() {
+            updated = true;
             match ev {
                 VncEvent::Connected { width, height } => {
                     self.width = width;
                     self.height = height;
                     self.connected = true;
-                    self.framebuffer = vec![0u8; width as usize * height as usize * 4];
-                    for pixel in self.framebuffer.chunks_exact_mut(4) {
-                        pixel[0] = 30;
-                        pixel[1] = 30;
-                        pixel[2] = 30;
-                        pixel[3] = 255;
-                    }
-                    self.dirty = true;
                     self.status = format!("Connected {}×{}", width, height);
                 }
                 VncEvent::Bitmap(region) => {
                     self.blit_region(&region);
-                    self.dirty = true;
                 }
                 VncEvent::Closed(reason) => {
                     self.closed = Some(reason.unwrap_or_else(|| "session closed".into()));
                     self.status = "Disconnected".to_string();
                 }
             }
+        }
+        updated
+    }
+
+    fn ensure_framebuffer(&mut self, ctx: &egui::Context) {
+        if self.width == 0 || self.height == 0 {
+            return;
+        }
+        if self.framebuffer.width() != self.width || self.framebuffer.height() != self.height {
+            self.framebuffer.resize(self.width, self.height, ctx);
+            for pixel in self.framebuffer.pixels_mut().chunks_exact_mut(4) {
+                pixel[0] = 30;
+                pixel[1] = 30;
+                pixel[2] = 30;
+                pixel[3] = 255;
+            }
+            self.framebuffer.mark_all_dirty();
         }
     }
 
@@ -91,30 +100,52 @@ impl VncTab {
         let rx = region.x as usize;
         let ry = region.y as usize;
 
-        if self.framebuffer.len() != fb_w * fb_h * 4 {
+        if self.framebuffer.pixels().len() != fb_w * fb_h * 4 {
             return;
         }
 
+        let pixels = self.framebuffer.pixels_mut();
         for row in 0..rh {
             let dst_y = ry + row;
-            if dst_y >= fb_h { break; }
-            for col in 0..rw {
-                let dst_x = rx + col;
-                if dst_x >= fb_w { break; }
-                let src_idx = (row * rw + col) * 4;
-                let dst_idx = (dst_y * fb_w + dst_x) * 4;
-                if src_idx + 4 > region.data.len() || dst_idx + 4 > self.framebuffer.len() {
-                    break;
-                }
-                self.framebuffer[dst_idx..dst_idx + 4]
-                    .copy_from_slice(&region.data[src_idx..src_idx + 4]);
+            if dst_y >= fb_h {
+                break;
             }
+            let src_row = row * rw * 4;
+            let dst_row = (dst_y * fb_w + rx) * 4;
+            let len = rw * 4;
+            if src_row + len > region.data.len() || dst_row + len > pixels.len() {
+                break;
+            }
+            pixels[dst_row..dst_row + len].copy_from_slice(&region.data[src_row..src_row + len]);
         }
+
+        self.framebuffer.mark_dirty_rect(
+            region.x as u32,
+            region.y as u32,
+            region.width as u32,
+            region.height as u32,
+        );
+    }
+
+    fn send_pointer(&mut self, x: u16, y: u16, button_mask: u8) {
+        if self.last_pointer == Some((x, y, button_mask)) {
+            return;
+        }
+        self.last_pointer = Some((x, y, button_mask));
+        let _ = self
+            .handle
+            .commands
+            .send(VncCommand::Pointer { x, y, button_mask });
     }
 }
 
 pub fn render_vnc_tab(ui: &mut Ui, tab: &mut VncTab) {
-    tab.pump();
+    let frame_updated = tab.pump();
+    if frame_updated {
+        ui.ctx().request_repaint();
+    }
+
+    tab.ensure_framebuffer(ui.ctx());
 
     // Status bar
     ui.horizontal(|ui| {
@@ -141,24 +172,9 @@ pub fn render_vnc_tab(ui: &mut Ui, tab: &mut VncTab) {
         return;
     }
 
-    // Update texture if framebuffer changed
-    if tab.dirty && !tab.framebuffer.is_empty() {
-        let image = ColorImage::from_rgba_unmultiplied(
-            [tab.width as usize, tab.height as usize],
-            &tab.framebuffer,
-        );
-        match &mut tab.texture {
-            Some(tex) => tex.set(image, TextureOptions::NEAREST),
-            None => {
-                tab.texture =
-                    Some(ui.ctx().load_texture("vnc_fb", image, TextureOptions::NEAREST));
-            }
-        }
-        tab.dirty = false;
-    }
+    tab.framebuffer.upload_dirty(ui.ctx());
 
-    // Render the framebuffer
-    if let Some(tex) = &tab.texture {
+    if !tab.framebuffer.is_empty() {
         let available = ui.available_size();
         let fb_w = tab.width as f32;
         let fb_h = tab.height as f32;
@@ -179,15 +195,9 @@ pub fn render_vnc_tab(ui: &mut Ui, tab: &mut VncTab) {
             egui::vec2(display_w, display_h),
         );
 
-        painter.image(
-            tex.id(),
-            img_rect,
-            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-            Color32::WHITE,
-        );
+        tab.framebuffer.paint(&painter, img_rect);
 
         // --- Forward mouse input ---
-        // Track current button state for the RFB button mask
         let hover_pos = response.hover_pos();
 
         // Button press/release via raw pointer events
@@ -228,19 +238,14 @@ pub fn render_vnc_tab(ui: &mut Ui, tab: &mut VncTab) {
             } else {
                 button_mask & !btn_bit
             };
-            let _ = tab.handle.commands.send(VncCommand::Pointer {
-                x: rel_x, y: rel_y, button_mask: mask,
-            });
+            tab.send_pointer(rel_x, rel_y, mask);
         }
 
-        // Send mouse move on hover
         if let Some(pos) = hover_pos {
             if img_rect.contains(pos) {
                 let rel_x = ((pos.x - img_rect.min.x) / scale).clamp(0.0, fb_w - 1.0) as u16;
                 let rel_y = ((pos.y - img_rect.min.y) / scale).clamp(0.0, fb_h - 1.0) as u16;
-                let _ = tab.handle.commands.send(VncCommand::Pointer {
-                    x: rel_x, y: rel_y, button_mask,
-                });
+                tab.send_pointer(rel_x, rel_y, button_mask);
             }
         }
 
@@ -251,15 +256,11 @@ pub fn render_vnc_tab(ui: &mut Ui, tab: &mut VncTab) {
                 if img_rect.contains(pos) {
                     let rel_x = ((pos.x - img_rect.min.x) / scale).clamp(0.0, fb_w - 1.0) as u16;
                     let rel_y = ((pos.y - img_rect.min.y) / scale).clamp(0.0, fb_h - 1.0) as u16;
-                    let scroll_btn = if scroll_delta.y > 0.0 { 8u8 } else { 16u8 }; // button 4 / 5
-                    // Press
-                    let _ = tab.handle.commands.send(VncCommand::Pointer {
-                        x: rel_x, y: rel_y, button_mask: button_mask | scroll_btn,
-                    });
-                    // Release
-                    let _ = tab.handle.commands.send(VncCommand::Pointer {
-                        x: rel_x, y: rel_y, button_mask,
-                    });
+                    let scroll_btn = if scroll_delta.y > 0.0 { 8u8 } else { 16u8 };
+                    tab.last_pointer = None;
+                    tab.send_pointer(rel_x, rel_y, button_mask | scroll_btn);
+                    tab.last_pointer = None;
+                    tab.send_pointer(rel_x, rel_y, button_mask);
                 }
             }
         }

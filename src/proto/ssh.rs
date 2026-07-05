@@ -5,11 +5,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use parking_lot::Mutex;
-use russh::client::{self, Handle, Handler, Msg, Session};
+use russh::client::{self, ChannelOpenHandle, Handle, Handler, Msg, Session};
 use russh::keys::agent::client::AgentClient;
 use russh::keys::ssh_key::HashAlg;
 use russh::keys::{PrivateKeyWithHashAlg, load_secret_key};
-use russh::{Channel, ChannelMsg, Disconnect};
+use russh::{Channel, ChannelMsg, ChannelOpenFailure, Disconnect};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -245,6 +245,7 @@ impl Handler for Client {
         connected_port: u32,
         _originator_address: &str,
         _originator_port: u32,
+        reply: ChannelOpenHandle,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
         let lookup = {
@@ -259,8 +260,12 @@ impl Handler for Client {
                 bound_port = connected_port,
                 "no remote-forward target registered for inbound channel; dropping"
             );
+            reply
+                .reject(ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
             return Ok(());
         };
+        reply.accept().await;
         tokio::spawn(async move {
             let mut local = match TcpStream::connect((target_host.as_str(), target_port)).await {
                 Ok(s) => s,
@@ -284,12 +289,17 @@ impl Handler for Client {
         channel: Channel<Msg>,
         _originator_address: &str,
         _originator_port: u32,
+        reply: ChannelOpenHandle,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
         let Some(target) = self.x11_target.clone() else {
             tracing::warn!("server opened X11 channel but no local X server target is configured");
+            reply
+                .reject(ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
             return Ok(());
         };
+        reply.accept().await;
         tokio::spawn(async move {
             let mut remote = channel.into_stream();
             match target {

@@ -8,6 +8,9 @@ use crate::config::shortcuts::AppShortcuts;
 
 use super::TerminalEmulator;
 
+const SCROLLBAR_WIDTH: f32 = 10.0;
+const SCROLLBAR_GAP: f32 = 4.0;
+
 pub struct TerminalView<'a> {
     pub emulator: &'a mut TerminalEmulator,
     pub shortcuts: &'a AppShortcuts,
@@ -19,8 +22,16 @@ impl<'a> TerminalView<'a> {
         let row_height = ui.fonts_mut(|f| f.row_height(&font_id)).max(14.0);
         let cell_width = ui.fonts_mut(|f| f.glyph_width(&font_id, 'M')).max(7.0);
 
+        let history_size = self.emulator.history_size();
+        let scrollbar_reserve = if history_size > 0 {
+            SCROLLBAR_WIDTH + SCROLLBAR_GAP
+        } else {
+            0.0
+        };
+
         let avail = ui.available_size();
-        let cols = ((avail.x / cell_width).floor() as u16).max(20);
+        let term_avail_w = (avail.x - scrollbar_reserve).max(cell_width * 20.0);
+        let cols = ((term_avail_w / cell_width).floor() as u16).max(20);
         let rows = ((avail.y / row_height).floor() as u16).max(5);
         self.emulator.resize(cols, rows);
 
@@ -29,10 +40,16 @@ impl<'a> TerminalView<'a> {
         }
 
         let snapshot = self.emulator.snapshot();
-        let (response, painter) = ui.allocate_painter(
-            Vec2::new(cols as f32 * cell_width, rows as f32 * row_height),
-            Sense::click_and_drag(),
-        );
+        let term_w = cols as f32 * cell_width;
+        let term_h = rows as f32 * row_height;
+
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+
+            let (response, painter) = ui.allocate_painter(
+                Vec2::new(term_w, term_h),
+                Sense::click_and_drag(),
+            );
 
         // While the terminal has focus, capture Tab, arrows, and Escape so they reach the
         // remote shell instead of being handled by egui (focus navigation, cancel, etc.).
@@ -138,21 +155,6 @@ impl<'a> TerminalView<'a> {
             }
         }
 
-        if snapshot.display_offset > 0 {
-            let label = format!(
-                "scrollback {} / {}",
-                snapshot.display_offset, snapshot.history_size
-            );
-            let badge_pos = Pos2::new(response.rect.max.x - 8.0, response.rect.min.y + 4.0);
-            painter.text(
-                badge_pos,
-                egui::Align2::RIGHT_TOP,
-                label,
-                FontId::new(11.0, FontFamily::Monospace),
-                Color32::from_rgb(0xa0, 0xa0, 0xa0),
-            );
-        }
-
         if let Some(reason) = &self.emulator.closed {
             painter.text(
                 response.rect.center(),
@@ -161,6 +163,10 @@ impl<'a> TerminalView<'a> {
                 TextStyle::Heading.resolve(ui.style()),
                 Color32::LIGHT_RED,
             );
+            if history_size > 0 {
+                ui.add_space(SCROLLBAR_GAP);
+                render_terminal_scrollbar(ui, self.emulator, term_h, row_height);
+            }
             return;
         }
 
@@ -498,6 +504,12 @@ impl<'a> TerminalView<'a> {
                 }
             }
         }
+
+            if history_size > 0 {
+                ui.add_space(SCROLLBAR_GAP);
+                render_terminal_scrollbar(ui, self.emulator, term_h, row_height);
+            }
+        });
     }
 
     fn render_find_bar(&mut self, ui: &mut Ui, term_rect: Rect) {
@@ -614,6 +626,96 @@ impl<'a> TerminalView<'a> {
         if close_requested {
             self.emulator.close_find();
         }
+    }
+}
+
+fn render_terminal_scrollbar(
+    ui: &mut Ui,
+    emulator: &mut TerminalEmulator,
+    height: f32,
+    row_height: f32,
+) {
+    let history = emulator.history_size();
+    if history == 0 {
+        return;
+    }
+
+    let display_offset = emulator.display_offset();
+    let screen_rows = (height / row_height).floor().max(1.0) as usize;
+
+    let (response, painter) = ui.allocate_painter(
+        Vec2::new(SCROLLBAR_WIDTH, height),
+        Sense::click_and_drag(),
+    );
+
+    let track = response.rect;
+    let track_bg = Color32::from_rgb(0x18, 0x18, 0x1c);
+    let track_border = Color32::from_rgb(0x2e, 0x2e, 0x34);
+    painter.rect_filled(track, 0.0, track_bg);
+    painter.rect_stroke(
+        track,
+        0.0,
+        Stroke::new(1.0, track_border),
+        egui::StrokeKind::Inside,
+    );
+
+    let total_lines = history + screen_rows;
+    let thumb_h = (track.height() * screen_rows as f32 / total_lines as f32)
+        .clamp(20.0, track.height());
+    let scroll_range = (track.height() - thumb_h).max(1.0);
+    let frac = display_offset as f32 / history as f32;
+    let thumb_top = track.min.y + (1.0 - frac) * scroll_range;
+    let thumb_rect = Rect::from_min_size(
+        Pos2::new(track.min.x + 1.0, thumb_top),
+        Vec2::new(track.width() - 2.0, thumb_h),
+    );
+
+    let active = response.hovered() || response.dragged();
+    let thumb_color = if active {
+        Color32::from_rgb(0x90, 0x90, 0x98)
+    } else if display_offset > 0 {
+        Color32::from_rgb(0x68, 0x68, 0x72)
+    } else {
+        Color32::from_rgb(0x48, 0x48, 0x50)
+    };
+    painter.rect_filled(thumb_rect, 2.0, thumb_color);
+
+    if response.clicked() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            if pos.y < thumb_rect.min.y {
+                emulator.page_up();
+            } else if pos.y > thumb_rect.max.y {
+                emulator.page_down();
+            }
+        }
+    }
+
+    if response.dragged() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            let rel = ((pos.y - track.min.y) / scroll_range).clamp(0.0, 1.0);
+            let offset = ((1.0 - rel) * history as f32).round() as usize;
+            emulator.scroll_to_display_offset(offset);
+            ui.ctx().request_repaint();
+        }
+    }
+
+    if response.hovered() || response.dragged() {
+        let scroll_delta = ui.ctx().input(|i| i.smooth_scroll_delta.y);
+        if scroll_delta.abs() > 0.5 {
+            let lines = (scroll_delta / row_height).round() as i32;
+            if lines != 0 {
+                emulator.scroll(lines);
+            }
+        }
+    }
+
+    if response.hovered() {
+        let label = if display_offset > 0 {
+            format!("scrollback {display_offset} / {history}")
+        } else {
+            "live".to_string()
+        };
+        response.on_hover_text(label);
     }
 }
 

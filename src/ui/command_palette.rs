@@ -72,8 +72,7 @@ impl CommandPalette {
             self.selected = filtered.len().saturating_sub(1);
         }
 
-        #[allow(deprecated)]
-        let screen = ctx.input(|i| i.screen_rect());
+        let screen = ctx.input(|i| i.viewport_rect());
         let palette_width = (screen.width() * 0.55).clamp(420.0, 720.0);
         let palette_pos = egui::pos2(
             screen.center().x - palette_width * 0.5,

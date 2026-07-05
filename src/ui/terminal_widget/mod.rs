@@ -426,6 +426,28 @@ impl TerminalEmulator {
         self.term.lock().grid().display_offset()
     }
 
+    pub fn history_size(&self) -> usize {
+        self.term.lock().history_size()
+    }
+
+    pub fn scroll_to_display_offset(&mut self, offset: usize) {
+        let mut term = self.term.lock();
+        let target = offset.min(term.history_size());
+        let current = term.grid().display_offset();
+        let delta = target as i32 - current as i32;
+        if delta != 0 {
+            term.scroll_display(Scroll::Delta(delta));
+        }
+    }
+
+    pub fn page_up(&mut self) {
+        self.scroll(self.rows as i32);
+    }
+
+    pub fn page_down(&mut self) {
+        self.scroll(-(self.rows as i32));
+    }
+
     /// True when the remote app enabled DECCKM (e.g. vim), so cursor keys use SS3 (`ESC O …`).
     pub fn app_cursor_keys(&self) -> bool {
         self.term.lock().mode().contains(TermMode::APP_CURSOR)

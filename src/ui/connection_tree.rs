@@ -2,7 +2,7 @@ use egui::{
     CollapsingHeader, FontId, Frame, Id, LayerId, Order, PointerButton, RichText, ScrollArea,
     Sense, Stroke, TextEdit, Ui, UiBuilder,
 };
-use egui::containers::scroll_area::ScrollSource;
+use egui::containers::scroll_area::{DragScroll, ScrollSource};
 use nucleo_matcher::{
     Matcher, Utf32Str,
     pattern::{CaseMatching, Normalization, Pattern},
@@ -89,7 +89,7 @@ impl<'a> ConnectionTree<'a> {
                 ScrollArea::vertical()
                     .id_salt("e_sh_connection_tree_scroll")
                     .scroll_source(ScrollSource {
-                        drag: false,
+                        drag: DragScroll::Never,
                         ..Default::default()
                     })
                     .show(ui, |ui| {

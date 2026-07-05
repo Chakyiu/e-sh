@@ -1289,7 +1289,7 @@ enum PaneToolbarAction {
 fn render_pane_toolbar(
     ui: &mut Ui,
     buf: &mut String,
-    filter_id: impl std::hash::Hash,
+    filter_id: impl std::hash::Hash + std::fmt::Debug,
 ) -> Option<PaneToolbarAction> {
     let mut action = None;
     ui.horizontal(|ui| {
