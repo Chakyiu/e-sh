@@ -47,7 +47,7 @@ parking_lot = "0.12"
 portable-pty = "0.9.0"
 uuid = { version = "1.23.2", features = ["v4", "serde"] }
 rfd = "0.17"
-age = "0.11"
+age = "0.12"
 base64 = "0.22"
 nucleo-matcher = "0.3"
 flate2 = "1"
