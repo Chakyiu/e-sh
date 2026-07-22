@@ -324,10 +324,35 @@ impl<'a> TerminalView<'a> {
             for ev in &events {
                 match ev {
                     egui::Event::Copy => {
-                        if let Some(text) = self.emulator.selection_text() {
-                            if !text.is_empty() {
-                                ui.ctx().copy_text(text);
+                        // On Linux/Windows, winit turns BOTH Ctrl+C and Ctrl+Shift+C into
+                        // Event::Copy and swallows the matching Event::Key (see egui-winit
+                        // is_copy_command + early return). We must only touch the clipboard for a
+                        // genuine *copy* gesture; a bare Ctrl+C has to reach the shell as SIGINT
+                        // (0x03), otherwise nano/vim/less/etc. can never be interrupted.
+                        // Copy gesture = macOS Cmd+C, or Ctrl+Shift+C on Linux/Windows.
+                        let copy_gesture = mods.mac_cmd || mods.shift;
+                        if copy_gesture {
+                            if let Some(text) = self.emulator.selection_text() {
+                                if !text.is_empty() {
+                                    ui.ctx().copy_text(text);
+                                }
                             }
+                        } else {
+                            if let Some(p) = pending_printable.take() {
+                                buf.push(p);
+                            }
+                            buf.push(0x03); // ETX / Ctrl+C -> SIGINT
+                        }
+                    }
+                    egui::Event::Cut => {
+                        // winit turns Ctrl+X into Event::Cut and swallows the Key event, which this
+                        // widget otherwise drops entirely. Forward it to the shell as 0x18 (CAN /
+                        // Ctrl+X) so e.g. nano's "Exit" works. macOS Cmd+X is left as a no-op.
+                        if !mods.mac_cmd {
+                            if let Some(p) = pending_printable.take() {
+                                buf.push(p);
+                            }
+                            buf.push(0x18); // CAN / Ctrl+X
                         }
                     }
                     egui::Event::Text(text) => {
