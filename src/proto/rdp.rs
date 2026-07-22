@@ -14,6 +14,7 @@ use crate::core::connection::{AuthMethod, Connection};
 const MSG_CONNECTED: u8 = 1;
 const MSG_BITMAP: u8 = 2;
 const MSG_CLOSED: u8 = 3;
+const MSG_RESIZED: u8 = 4;
 
 // Command types (app -> helper)
 const CMD_MOUSE_MOVE: u8 = 10;
@@ -21,6 +22,7 @@ const CMD_MOUSE_BUTTON: u8 = 11;
 const CMD_KEY: u8 = 12;
 const CMD_SHUTDOWN: u8 = 13;
 const CMD_MOUSE_SCROLL: u8 = 14;
+const CMD_RESIZE: u8 = 15;
 
 #[derive(Clone)]
 pub struct BitmapRegion {
@@ -35,6 +37,8 @@ pub struct BitmapRegion {
 pub enum RdpEvent {
     Connected { width: u16, height: u16, external_window: bool },
     Bitmap(BitmapRegion),
+    /// The remote desktop was re-negotiated to a new size (dynamic resolution).
+    Resized { width: u16, height: u16 },
     Closed(Option<String>),
 }
 
@@ -44,6 +48,8 @@ pub enum RdpCommand {
     /// Scroll wheel: positive = up, negative = down
     Scroll { x: u16, y: u16, delta: i16 },
     Key { code: u16, pressed: bool },
+    /// Request a live remote-desktop resolution change (dynamic resolution).
+    Resize { width: u16, height: u16 },
     Shutdown,
 }
 
@@ -150,6 +156,7 @@ fn run_rdp_helper(
             crate::core::connection::RdpSecurityMode::Tls => "tls",
             crate::core::connection::RdpSecurityMode::Rdp => "rdp",
         },
+        "dynamic_resolution": conn.rdp_dynamic_resolution,
     });
 
     let mut child = Command::new(&helper_path)
@@ -224,6 +231,11 @@ fn run_rdp_helper(
                     left, top, width, height, data, bpp,
                 }));
             }
+            MSG_RESIZED if payload.len() >= 4 => {
+                let width = u16::from_le_bytes([payload[0], payload[1]]);
+                let height = u16::from_le_bytes([payload[2], payload[3]]);
+                let _ = event_tx.send(RdpEvent::Resized { width, height });
+            }
             MSG_CLOSED => {
                 let reason = String::from_utf8_lossy(&payload).to_string();
                 let _ = event_tx.send(RdpEvent::Closed(Some(reason)));
@@ -276,6 +288,13 @@ fn encode_command(cmd: &RdpCommand) -> Vec<u8> {
             buf.extend_from_slice(&x.to_le_bytes());
             buf.extend_from_slice(&y.to_le_bytes());
             buf.extend_from_slice(&delta.to_le_bytes());
+            buf
+        }
+        RdpCommand::Resize { width, height } => {
+            let mut buf = vec![CMD_RESIZE];
+            buf.extend_from_slice(&4u32.to_le_bytes());
+            buf.extend_from_slice(&width.to_le_bytes());
+            buf.extend_from_slice(&height.to_le_bytes());
             buf
         }
         RdpCommand::Shutdown => {

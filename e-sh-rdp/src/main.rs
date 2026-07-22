@@ -22,6 +22,11 @@ struct Params {
     /// `"negotiate"` (default), `"nla"`, `"tls"`, or `"rdp"` (legacy).
     #[serde(default = "default_security_mode")]
     rdp_security_mode: String,
+    /// When true (default), the built-in IronRDP backend advertises the
+    /// Display Control virtual channel and honors live resize requests
+    /// (equivalent to xfreerdp's `/dynamic-resolution`).
+    #[serde(default = "default_dynamic_resolution")]
+    dynamic_resolution: bool,
 }
 
 fn default_backend() -> String {
@@ -36,14 +41,23 @@ fn default_security_mode() -> String {
     "negotiate".into()
 }
 
+fn default_dynamic_resolution() -> bool {
+    true
+}
+
 const MSG_CONNECTED: u8 = 1;
 const MSG_BITMAP: u8 = 2;
 const MSG_CLOSED: u8 = 3;
+/// The desktop was re-negotiated to a new size (dynamic resolution). Payload:
+/// width: u16, height: u16 (little-endian). The UI reallocates its framebuffer.
+const MSG_RESIZED: u8 = 4;
 const CMD_MOUSE_MOVE: u8 = 10;
 const CMD_MOUSE_BUTTON: u8 = 11;
 const CMD_KEY: u8 = 12;
 const CMD_SHUTDOWN: u8 = 13;
 const CMD_MOUSE_SCROLL: u8 = 14;
+/// Request a live resolution change. Payload: width: u16, height: u16.
+const CMD_RESIZE: u8 = 15;
 
 fn write_msg(out: &mut impl Write, t: u8, p: &[u8]) -> io::Result<()> {
     out.write_all(&[t])?;
@@ -235,6 +249,19 @@ async fn session(p: &Params, out: &mut impl Write) -> Result<()> {
 
     let mut conn = ClientConnector::new(config, sock);
 
+    // Advertise the Display Control virtual channel (MS-RDPEDISP) so the
+    // server accepts live MonitorLayout updates. Without this the desktop is
+    // fixed at the initial width×height and resizing the window just scales a
+    // blurry bitmap. The channel is carried over DRDYNVC.
+    if p.dynamic_resolution {
+        use ironrdp::displaycontrol::client::DisplayControlClient;
+        use ironrdp::dvc::DrdynvcClient;
+        conn = conn.with_static_channel(
+            DrdynvcClient::new()
+                .with_dynamic_channel(DisplayControlClient::new(|_caps| Ok(Vec::new()))),
+        );
+    }
+
     let tcp = TcpStream::connect(&addr).await.context("TCP connect")?;
     let mut f: Framed<TokioStream<TcpStream>> = Framed::new(tcp);
     let upgrade = connect_begin(&mut f, &mut conn)
@@ -264,8 +291,14 @@ async fn session(p: &Params, out: &mut impl Write) -> Result<()> {
     let cr = finalize_xrdp_compat(up, conn, &mut f2, &mut NoNet, sn, spk).await?;
     let mut framed = f2;
 
-    let w = cr.desktop_size.width;
-    let h = cr.desktop_size.height;
+    // `w`/`h` track the *current* negotiated desktop size. They change when a
+    // dynamic-resolution resize triggers the Deactivation-Reactivation Sequence.
+    let mut w = cr.desktop_size.width;
+    let mut h = cr.desktop_size.height;
+    // Latest requested size that has not yet been sent to the server (e.g.
+    // because the Display Control channel was not ready yet). Coalesced: only
+    // the most recent request survives.
+    let mut pending_resize: Option<(u16, u16)> = None;
     let mut buf4 = Vec::with_capacity(5);
     buf4.extend_from_slice(&w.to_le_bytes());
     buf4.extend_from_slice(&h.to_le_bytes());
@@ -313,7 +346,7 @@ async fn session(p: &Params, out: &mut impl Write) -> Result<()> {
                     do_cmd(&c, &mut stage, &mut img, &mut framed, &mut input_db).await?;
                     return Ok(());
                 }
-                do_cmd(&c, &mut stage, &mut img, &mut framed, &mut input_db).await?;
+                handle_input(&c, &mut stage, &mut img, &mut framed, &mut input_db, &mut pending_resize).await?;
             }
         }
 
@@ -326,7 +359,7 @@ async fn session(p: &Params, out: &mut impl Write) -> Result<()> {
                             do_cmd(&c, &mut stage, &mut img, &mut framed, &mut input_db).await?;
                             return Ok(());
                         }
-                        do_cmd(&c, &mut stage, &mut img, &mut framed, &mut input_db).await?;
+                        handle_input(&c, &mut stage, &mut img, &mut framed, &mut input_db, &mut pending_resize).await?;
                     }
                     None => {
                         // Parent closed the pipe — exit gracefully
@@ -374,6 +407,26 @@ async fn session(p: &Params, out: &mut impl Write) -> Result<()> {
                             }
                             write_msg(out, MSG_BITMAP, &b)?;
                         }
+                        ActiveStageOutput::DeactivateAll(mut cas) => {
+                            // Dynamic resolution: the server acknowledged our
+                            // MonitorLayout request by starting the
+                            // Deactivation-Reactivation Sequence. Drive it to
+                            // completion, then adopt the new desktop size.
+                            let (nw, nh) =
+                                run_reactivation(&mut *cas, &mut stage, &mut framed).await?;
+                            w = nw;
+                            h = nh;
+                            img = ironrdp::session::image::DecodedImage::new(
+                                ironrdp::graphics::image_processing::PixelFormat::BgrX32,
+                                w,
+                                h,
+                            );
+                            // Tell the UI to reallocate its framebuffer.
+                            let mut rb = Vec::with_capacity(4);
+                            rb.extend_from_slice(&w.to_le_bytes());
+                            rb.extend_from_slice(&h.to_le_bytes());
+                            write_msg(out, MSG_RESIZED, &rb)?;
+                        }
                         ActiveStageOutput::Terminate(r) => {
                             write_msg(out, MSG_CLOSED, format!("{r:?}").as_bytes())?;
                             return Ok(());
@@ -381,7 +434,120 @@ async fn session(p: &Params, out: &mut impl Write) -> Result<()> {
                         _ => {}
                     }
                 }
+
+                // A PDU may have carried the Display Control capabilities that
+                // make the channel ready. Retry any resize that was deferred.
+                try_flush_resize(&mut pending_resize, &mut stage, &mut framed).await?;
             }
+        }
+    }
+}
+
+/// Handle one command from the UI. `CMD_RESIZE` is intercepted here (it needs
+/// access to the deferred-resize state); everything else falls through to
+/// [`do_cmd`].
+async fn handle_input<S: ironrdp_tokio::FramedWrite + ironrdp_tokio::FramedRead>(
+    c: &[u8],
+    stage: &mut ironrdp::session::ActiveStage,
+    img: &mut ironrdp::session::image::DecodedImage,
+    f: &mut ironrdp_tokio::Framed<S>,
+    input_db: &mut ironrdp::input::Database,
+    pending_resize: &mut Option<(u16, u16)>,
+) -> Result<()> {
+    if c[0] == CMD_RESIZE && c.len() >= 5 {
+        let rw = u16::from_le_bytes([c[1], c[2]]);
+        let rh = u16::from_le_bytes([c[3], c[4]]);
+        // Coalesce: keep only the newest requested size.
+        *pending_resize = Some((rw, rh));
+        try_flush_resize(pending_resize, stage, f).await?;
+        return Ok(());
+    }
+    do_cmd(c, stage, img, f, input_db).await
+}
+
+/// If a resize is pending and the Display Control channel is ready, send the
+/// MonitorLayout PDU. Clears `pending_resize` once sent; leaves it in place if
+/// the channel is not ready yet (we'll retry after the next server PDU).
+async fn try_flush_resize<S: ironrdp_tokio::FramedWrite>(
+    pending_resize: &mut Option<(u16, u16)>,
+    stage: &mut ironrdp::session::ActiveStage,
+    f: &mut ironrdp_tokio::Framed<S>,
+) -> Result<()> {
+    use ironrdp::displaycontrol::pdu::MonitorLayoutEntry;
+    use ironrdp_tokio::FramedWrite as _;
+
+    let Some((rw, rh)) = *pending_resize else {
+        return Ok(());
+    };
+
+    // Clamp to the protocol's valid range (>=200, <=8192, even width).
+    let (aw, ah) = MonitorLayoutEntry::adjust_display_size(u32::from(rw), u32::from(rh));
+
+    match stage.encode_resize(aw, ah, None, None) {
+        Some(res) => {
+            let frame = res.map_err(|e| anyhow::anyhow!("encode_resize: {e}"))?;
+            f.write_all(&frame)
+                .await
+                .map_err(|e| anyhow::anyhow!("write resize: {e}"))?;
+            // Request is in flight; the server will drive the
+            // Deactivation-Reactivation Sequence next.
+            *pending_resize = None;
+        }
+        // Display Control channel not available/ready yet — keep the request
+        // and try again after the next PDU.
+        None => {}
+    }
+    Ok(())
+}
+
+/// Drive the Deactivation-Reactivation Sequence to completion after a resize.
+/// Returns the new negotiated desktop size and updates the active stage's
+/// fast-path processor with the fresh channel IDs.
+async fn run_reactivation<S: ironrdp_tokio::FramedRead + ironrdp_tokio::FramedWrite>(
+    cas: &mut ironrdp::connector::connection_activation::ConnectionActivationSequence,
+    stage: &mut ironrdp::session::ActiveStage,
+    f: &mut ironrdp_tokio::Framed<S>,
+) -> Result<(u16, u16)> {
+    use ironrdp::connector::connection_activation::ConnectionActivationState;
+    use ironrdp::core::WriteBuf;
+    use ironrdp::session::fast_path;
+    use ironrdp_tokio::{single_sequence_step_read, FramedWrite as _};
+
+    let mut buf = WriteBuf::new();
+    loop {
+        let written = single_sequence_step_read(&mut *f, &mut *cas, &mut buf)
+            .await
+            .map_err(|e| anyhow::anyhow!("reactivation step: {e}"))?;
+
+        if written.size().is_some() {
+            f.write_all(buf.filled())
+                .await
+                .map_err(|e| anyhow::anyhow!("reactivation write: {e}"))?;
+        }
+
+        if let ConnectionActivationState::Finalized {
+            io_channel_id,
+            user_channel_id,
+            desktop_size,
+            share_id,
+            enable_server_pointer,
+            pointer_software_rendering,
+        } = cas.connection_activation_state()
+        {
+            stage.set_fastpath_processor(
+                fast_path::ProcessorBuilder {
+                    io_channel_id,
+                    user_channel_id,
+                    share_id,
+                    enable_server_pointer,
+                    pointer_software_rendering,
+                    bulk_decompressor: None,
+                }
+                .build(),
+            );
+            stage.set_share_id(share_id);
+            stage.set_enable_server_pointer(enable_server_pointer);
+            return Ok((desktop_size.width, desktop_size.height));
         }
     }
 }

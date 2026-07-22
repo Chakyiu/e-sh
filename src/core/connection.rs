@@ -247,10 +247,17 @@ pub struct Connection {
     pub rdp_width: u16,
     #[serde(default = "default_rdp_height")]
     pub rdp_height: u16,
+    /// Built-in IronRDP backend: resize the remote desktop to match the window
+    /// (Display Control / MS-RDPEDISP), like xfreerdp's `/dynamic-resolution`.
+    #[serde(default = "default_rdp_dynamic_resolution")]
+    pub rdp_dynamic_resolution: bool,
 }
 
 fn default_rdp_width() -> u16 { 1920 }
-fn default_rdp_height() -> u16 { 1080 }#[derive(Deserialize)]
+fn default_rdp_height() -> u16 { 1080 }
+fn default_rdp_dynamic_resolution() -> bool { true }
+
+#[derive(Deserialize)]
 struct ConnectionRaw {
     id: Uuid,
     name: String,
@@ -292,6 +299,8 @@ struct ConnectionRaw {
     rdp_width: u16,
     #[serde(default = "default_rdp_height")]
     rdp_height: u16,
+    #[serde(default = "default_rdp_dynamic_resolution")]
+    rdp_dynamic_resolution: bool,
 }
 
 impl From<ConnectionRaw> for Connection {
@@ -325,6 +334,7 @@ impl From<ConnectionRaw> for Connection {
             rdp_security_mode: raw.rdp_security_mode,
             rdp_width: raw.rdp_width,
             rdp_height: raw.rdp_height,
+            rdp_dynamic_resolution: raw.rdp_dynamic_resolution,
         }
     }
 }
@@ -354,6 +364,7 @@ impl Connection {
             rdp_security_mode: RdpSecurityMode::default(),
             rdp_width: default_rdp_width(),
             rdp_height: default_rdp_height(),
+            rdp_dynamic_resolution: default_rdp_dynamic_resolution(),
         }
     }
 

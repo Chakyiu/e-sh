@@ -380,6 +380,10 @@ impl EshApp {
         }
         let label = format!("{}@{}:{}", conn.username, conn.host, conn.port);
         let title = format!("{} (RDP)", conn.name);
+        // Dynamic resolution only applies to the embedded IronRDP viewer, not
+        // the external FreeRDP window.
+        let dynamic_resolution = conn.rdp_dynamic_resolution
+            && conn.rdp_backend != e_sh::core::connection::RdpBackend::Freerdp;
         let handle = spawn_rdp_session(&self.rt, conn);
         let tab = EshTab::Rdp(RdpTab::new(
             Uuid::new_v4(),
@@ -387,6 +391,7 @@ impl EshApp {
             title,
             label.clone(),
             handle,
+            dynamic_resolution,
         ));
         self.push_tab(tab);
         self.status = format!("Opened RDP {label}");

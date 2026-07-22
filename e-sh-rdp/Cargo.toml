@@ -15,6 +15,12 @@ ironrdp = { git = "https://github.com/Devolutions/IronRDP", rev = "3fe6d157e0b55
     "session",
     "graphics",
     "input",
+    # Dynamic resolution (MS-RDPEDISP): the Display Control dynamic virtual
+    # channel is carried over DRDYNVC (a static virtual channel), so we need
+    # svc + dvc + displaycontrol in addition to the base features.
+    "svc",
+    "dvc",
+    "displaycontrol",
 ] }
 ironrdp-tokio = { git = "https://github.com/Devolutions/IronRDP", rev = "3fe6d157e0b55bddfdac20af290a6cfa6e550576" }
 ironrdp-tls = { git = "https://github.com/Devolutions/IronRDP", rev = "3fe6d157e0b55bddfdac20af290a6cfa6e550576", features = [

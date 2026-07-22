@@ -712,6 +712,30 @@ impl EditConnectionDialog {
             });
         });
 
+        // Dynamic resolution — applies to the built-in IronRDP backend (also
+        // used first in Auto mode). When enabled, the remote desktop is resized
+        // to match the tab as you resize the window, so the image stays crisp
+        // instead of being scaled. Falls back gracefully if the server doesn't
+        // support Display Control.
+        if self.draft.rdp_backend != RdpBackend::Freerdp {
+            form_row(ui, "Dynamic Res.", |ui| {
+                ui.horizontal(|ui| {
+                    ui.checkbox(
+                        &mut self.draft.rdp_dynamic_resolution,
+                        "Resize desktop to fit the window (IronRDP)",
+                    );
+                    ui.weak("ℹ").on_hover_text(
+                        "Built-in IronRDP backend: negotiates the Display Control\n\
+                         channel (MS-RDPEDISP) and updates the remote resolution\n\
+                         live as you resize the tab — like xfreerdp /dynamic-resolution.\n\
+                         When off, the desktop stays at the fixed width × height above\n\
+                         and is scaled to fit. Ignored by the external FreeRDP backend\n\
+                         (use Resize Mode below for that).",
+                    );
+                });
+            });
+        }
+
         // FreeRDP resize mode — only relevant when FreeRDP may be used
         if self.draft.rdp_backend != RdpBackend::Ironrdp {
             form_row(ui, "Resize Mode", |ui| {

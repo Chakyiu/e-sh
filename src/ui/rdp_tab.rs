@@ -1,11 +1,17 @@
 //! RDP viewer tab — renders the remote desktop as an egui texture
 //! and forwards mouse/keyboard input to the RDP session.
 
+use std::time::{Duration, Instant};
+
 use egui::{Color32, RichText, Ui};
 use uuid::Uuid;
 
 use crate::proto::rdp::{RdpCommand, RdpEvent, RdpHandle, RdpMouseButton};
 use crate::ui::remote_framebuffer::RemoteFramebuffer;
+
+/// How long to wait after the last window-size change before asking the server
+/// for a new resolution, so a drag doesn't spam MonitorLayout PDUs.
+const RESIZE_DEBOUNCE: Duration = Duration::from_millis(400);
 
 pub struct RdpTab {
     pub id: Uuid,
@@ -28,6 +34,15 @@ pub struct RdpTab {
     /// Track modifier key state so we can send press/release on change.
     prev_modifiers: egui::Modifiers,
     last_mouse: Option<(u16, u16)>,
+
+    /// Dynamic resolution: resize the remote desktop to match the tab.
+    dynamic_resolution: bool,
+    /// Debounced target size we intend to request once the timer elapses.
+    pending_resize: Option<(u16, u16)>,
+    /// When the debounce timer fires.
+    resize_deadline: Option<Instant>,
+    /// Last size actually sent to the server, to avoid duplicate requests.
+    last_requested: Option<(u16, u16)>,
 }
 
 impl RdpTab {
@@ -37,6 +52,7 @@ impl RdpTab {
         title: String,
         connection_label: String,
         handle: RdpHandle,
+        dynamic_resolution: bool,
     ) -> Self {
         Self {
             id,
@@ -55,6 +71,10 @@ impl RdpTab {
             status: "Connecting...".to_string(),
             prev_modifiers: egui::Modifiers::NONE,
             last_mouse: None,
+            dynamic_resolution,
+            pending_resize: None,
+            resize_deadline: None,
+            last_requested: None,
         }
     }
 
@@ -76,6 +96,14 @@ impl RdpTab {
                 }
                 RdpEvent::Bitmap(region) => {
                     self.blit_region(&region);
+                }
+                RdpEvent::Resized { width, height } => {
+                    // The server re-negotiated to a new desktop size. Adopt it;
+                    // ensure_framebuffer() will reallocate the texture, and the
+                    // server follows up with a full repaint.
+                    self.width = width;
+                    self.height = height;
+                    self.status = format!("Connected {}x{}", width, height);
                 }
                 RdpEvent::Closed(reason) => {
                     self.closed = Some(reason.unwrap_or_else(|| "session closed".into()));
@@ -200,6 +228,56 @@ impl RdpTab {
             region.height as u32,
         );
     }
+
+    /// Dynamic resolution: when the tab's drawing area changes, ask the server
+    /// to resize the remote desktop to match (in physical pixels, so the image
+    /// stays 1:1 and crisp). Debounced so a window drag doesn't spam the server.
+    fn maybe_request_resize(&mut self, ctx: &egui::Context, available: egui::Vec2) {
+        if !self.dynamic_resolution || !self.connected || self.external_window {
+            return;
+        }
+        if self.width == 0 || self.height == 0 {
+            return;
+        }
+
+        // Convert logical points to physical pixels for a pixel-perfect match.
+        let ppp = ctx.pixels_per_point();
+        let mut dw = (available.x * ppp).round() as i32;
+        let mut dh = (available.y * ppp).round() as i32;
+        // Clamp to the Display Control valid range; width must be even.
+        dw = dw.clamp(200, 8192) & !1;
+        dh = dh.clamp(200, 8192);
+        let target = (dw as u16, dh as u16);
+
+        // Steady state: we already asked for exactly this — do nothing.
+        if self.last_requested == Some(target) {
+            return;
+        }
+
+        // (Re)start the debounce timer whenever the target changes. A continuous
+        // drag keeps pushing the deadline forward until the size settles.
+        if self.pending_resize != Some(target) {
+            self.pending_resize = Some(target);
+            self.resize_deadline = Some(Instant::now() + RESIZE_DEBOUNCE);
+        }
+
+        if let Some(deadline) = self.resize_deadline {
+            let now = Instant::now();
+            if now >= deadline {
+                if let Some((w, h)) = self.pending_resize.take() {
+                    let _ = self
+                        .handle
+                        .commands
+                        .send(RdpCommand::Resize { width: w, height: h });
+                    self.last_requested = Some((w, h));
+                }
+                self.resize_deadline = None;
+            } else {
+                // Wake up to fire the resize even if nothing else is happening.
+                ctx.request_repaint_after(deadline - now);
+            }
+        }
+    }
 }
 
 pub fn render_rdp_tab(ui: &mut Ui, tab: &mut RdpTab) {
@@ -265,6 +343,10 @@ pub fn render_rdp_tab(ui: &mut Ui, tab: &mut RdpTab) {
     // Render the framebuffer
     if !tab.framebuffer.is_empty() {
         let available = ui.available_size();
+
+        // Dynamic resolution: request a remote resize to match the tab.
+        tab.maybe_request_resize(ui.ctx(), available);
+
         let fb_w = tab.width as f32;
         let fb_h = tab.height as f32;
 
