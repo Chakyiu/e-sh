@@ -1263,7 +1263,7 @@ fn handle_dropped_files(ui: &mut Ui, tab: &mut SftpTab) {
         return;
     }
     for f in dropped {
-        let Some(path) = f.path else { continue };
+        let path = f.path().to_path_buf();
         if !path.exists() {
             continue;
         }
