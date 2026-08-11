@@ -267,6 +267,25 @@ impl TerminalEmulator {
         }
     }
 
+    /// Extend the current selection to `(line, col)`, or start one from the
+    /// cursor when nothing is selected yet (Shift+click / Shift+drag).
+    pub fn extend_selection(&mut self, line: i32, col: usize, side: Side) {
+        let mut term = self.term.lock();
+        let cols = term.columns();
+        let column = Column(col.min(cols.saturating_sub(1)));
+        let point = Point::new(Line(line), column);
+        if let Some(selection) = term.selection.as_mut() {
+            selection.update(point, side);
+            selection.include_all();
+        } else {
+            let cursor = term.grid().cursor.point;
+            let mut selection = Selection::new(SelectionType::Simple, cursor, Side::Left);
+            selection.update(point, side);
+            selection.include_all();
+            term.selection = Some(selection);
+        }
+    }
+
     pub fn clear_selection(&mut self) {
         self.term.lock().selection = None;
     }

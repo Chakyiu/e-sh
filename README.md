@@ -58,8 +58,10 @@ alongside the main application.
   - `~` expansion + native file picker (`rfd`) for selecting private keys
   - Encrypted-key passphrases
   - 10 000-line scrollback with mouse-wheel scroll, click-and-drag selection,
-    Cmd-C / Ctrl-Shift-C to copy, Cmd-V / Ctrl-Shift-V to paste, Shift-PageUp/PageDown
-    and Shift-Home/End for keyboard scroll navigation
+    Shift+click / Shift+drag to extend (from existing selection or cursor),
+    double-click for word select, Cmd-C / Ctrl-Shift-C to copy, Cmd-V /
+    Ctrl-Shift-V to paste, Shift-PageUp/PageDown and Shift-Home/End for
+    keyboard scroll navigation
 - **TOFU host-key verification**:
   - SHA-256 fingerprints stored in `host_keys.toml`
   - Interactive modal prompt on first connect and on key mismatch

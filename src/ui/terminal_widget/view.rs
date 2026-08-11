@@ -225,6 +225,8 @@ impl<'a> TerminalView<'a> {
             }
         }
 
+        let shift_click = ui.input(|i| i.modifiers.shift);
+
         if response.drag_started() {
             // Use the stored press position for the anchor, falling back to
             // the current pointer position if unavailable.
@@ -232,10 +234,16 @@ impl<'a> TerminalView<'a> {
             let pos = anchor_pos.or(response.interact_pointer_pos());
             if let Some(pos) = pos {
                 let display_offset = self.emulator.display_offset();
-                let (line, col, _side) = to_cell(pos, display_offset);
-                // Always anchor on the Left side so the character under the
-                // cursor is included when dragging forward.
-                self.emulator.begin_selection(line, col, Side::Left);
+                let (line, col, side) = to_cell(pos, display_offset);
+                if shift_click {
+                    // Shift+drag extends an existing selection (or starts one
+                    // from the cursor) instead of replacing the anchor.
+                    self.emulator.extend_selection(line, col, side);
+                } else {
+                    // Always anchor on the Left side so the character under the
+                    // cursor is included when dragging forward.
+                    self.emulator.begin_selection(line, col, Side::Left);
+                }
             }
         } else if response.dragged() {
             if let Some(pos) = ui
@@ -265,19 +273,24 @@ impl<'a> TerminalView<'a> {
             let pos = anchor_pos.or(response.interact_pointer_pos());
             if let Some(pos) = pos {
                 let display_offset = self.emulator.display_offset();
-                let (line, col, _side) = to_cell(pos, display_offset);
-                let prev: Option<(f64, i32, usize)> = ui.data(|d| d.get_temp(dblclick_key));
-                let is_double = prev
-                    .map(|(t, pl, pc)| (now - t) < 0.4 && pl == line && pc == col)
-                    .unwrap_or(false);
-                ui.data_mut(|d| d.insert_temp(dblclick_key, (now, line, col)));
+                let (line, col, side) = to_cell(pos, display_offset);
 
-                if is_double {
-                    self.emulator.begin_semantic_selection(line, col);
+                if shift_click {
+                    self.emulator.extend_selection(line, col, side);
                 } else {
-                    self.emulator.clear_selection();
+                    let prev: Option<(f64, i32, usize)> = ui.data(|d| d.get_temp(dblclick_key));
+                    let is_double = prev
+                        .map(|(t, pl, pc)| (now - t) < 0.4 && pl == line && pc == col)
+                        .unwrap_or(false);
+                    ui.data_mut(|d| d.insert_temp(dblclick_key, (now, line, col)));
+
+                    if is_double {
+                        self.emulator.begin_semantic_selection(line, col);
+                    } else {
+                        self.emulator.clear_selection();
+                    }
                 }
-            } else {
+            } else if !shift_click {
                 self.emulator.clear_selection();
             }
         }
