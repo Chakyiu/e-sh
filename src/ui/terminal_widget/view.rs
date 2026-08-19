@@ -1,7 +1,7 @@
 use alacritty_terminal::index::Side;
 use egui::{
-    Area, Color32, CornerRadius, EventFilter, FontFamily, FontId, Frame, ImeEvent, Key, Modifiers,
-    Order, Pos2, Rect, Sense, Stroke, TextEdit, TextStyle, Ui, Vec2,
+    Area, Color32, CornerRadius, EventFilter, FontFamily, FontId, Frame, IMEPurpose, ImeEvent, Key,
+    Modifiers, Order, Pos2, Rect, Sense, Stroke, TextEdit, TextStyle, Ui, Vec2,
 };
 
 use crate::config::shortcuts::AppShortcuts;
@@ -86,7 +86,8 @@ impl<'a> TerminalView<'a> {
                 if bg != bg_default {
                     painter.rect_filled(cell_rect, 0.0, bg);
                 }
-                if cell.ch != ' ' && cell.ch != '\0' {
+                // Wide-char spacers occupy a grid column but must not paint a glyph.
+                if !cell.spacer && cell.ch != ' ' && cell.ch != '\0' {
                     let fg = Color32::from_rgb(cell.fg[0], cell.fg[1], cell.fg[2]);
                     let glyph_font = FontId::new(
                         font_id.size,
@@ -104,11 +105,16 @@ impl<'a> TerminalView<'a> {
                         fg,
                     );
                 }
-                if cell.underline {
+                if cell.underline && !cell.spacer {
+                    let underline_w = if cell.wide {
+                        cell_width * 2.0
+                    } else {
+                        cell_width
+                    };
                     painter.line_segment(
                         [
                             Pos2::new(x, y + row_height - 1.0),
-                            Pos2::new(x + cell_width, y + row_height - 1.0),
+                            Pos2::new(x + underline_w, y + row_height - 1.0),
                         ],
                         Stroke::new(1.0, Color32::from_rgb(cell.fg[0], cell.fg[1], cell.fg[2])),
                     );
@@ -320,11 +326,43 @@ impl<'a> TerminalView<'a> {
         }
 
         if response.has_focus() {
+            let ime_key = egui::Id::new(("term_ime_preedit", self.emulator as *const _ as usize));
+            let mut preedit = ui.data(|d| d.get_temp::<String>(ime_key).unwrap_or_default());
+
+            let (cy, cx) = snapshot.cursor;
+            let cursor_rect = Rect::from_min_size(
+                Pos2::new(
+                    origin.x + cx as f32 * cell_width,
+                    origin.y + cy as f32 * row_height,
+                ),
+                Vec2::new(cell_width, row_height),
+            );
+            // Tell winit to attach the OS IME (速成 / Pinyin / etc.) to this widget.
+            // Without this, composition keys are delivered as Event::Text and leak
+            // radicals into the PTY one-by-one.
+            ui.output_mut(|o| {
+                o.mutable_text_under_cursor = true;
+                o.ime = Some(egui::output::IMEOutput {
+                    purpose: IMEPurpose::Terminal,
+                    rect: response.rect,
+                    cursor_rect,
+                    should_interrupt_composition: false,
+                });
+            });
+
             let (events, mods) = ui
                 .ctx()
                 .input(|input| (input.events.clone(), input.modifiers));
             let paste_text = resolve_paste_text(&events, mods);
             let paste_active = paste_text.as_ref().is_some_and(|t| !t.is_empty());
+            let ime_commits = ime_commit_texts(&events);
+            for ev in &events {
+                match ev {
+                    egui::Event::Ime(ImeEvent::Preedit { text, .. }) => preedit = text.clone(),
+                    egui::Event::Ime(ImeEvent::Commit(_)) => preedit.clear(),
+                    _ => {}
+                }
+            }
 
             let mut buf: Vec<u8> = Vec::new();
             // Keys that may also produce `Event::Text`: defer one frame to avoid duplicate bytes
@@ -350,6 +388,10 @@ impl<'a> TerminalView<'a> {
                         if mods.command && (text == "c" || text == "C") {
                             continue;
                         }
+                        // IME is composing, or this text is the same commit delivered twice.
+                        if !preedit.is_empty() || ime_commits.iter().any(|c| c == text) {
+                            continue;
+                        }
                         if text.len() == 1 {
                             let b = text.as_bytes()[0];
                             if pending_printable == Some(b) {
@@ -369,14 +411,18 @@ impl<'a> TerminalView<'a> {
                         }
                     }
                     egui::Event::Paste(_) => continue,
+                    egui::Event::Ime(ImeEvent::Preedit { text, .. }) => {
+                        preedit = text.clone();
+                    }
                     egui::Event::Ime(ImeEvent::Commit(text)) => {
-                        if paste_active {
+                        preedit.clear();
+                        if paste_active || text.is_empty() {
                             continue;
                         }
+                        if let Some(p) = pending_printable.take() {
+                            buf.push(p);
+                        }
                         if text.len() >= PASTE_BURST_MIN_LEN {
-                            if let Some(p) = pending_printable.take() {
-                                buf.push(p);
-                            }
                             if !buf.is_empty() {
                                 self.emulator.scroll_to_bottom();
                                 self.emulator.send_input(std::mem::take(&mut buf));
@@ -388,9 +434,6 @@ impl<'a> TerminalView<'a> {
                             typing_active = true;
                             ui.data_mut(|d| d.insert_temp(typing_key, now));
                         } else {
-                            if let Some(p) = pending_printable.take() {
-                                buf.push(p);
-                            }
                             buf.extend_from_slice(text.as_bytes());
                         }
                     }
@@ -401,6 +444,14 @@ impl<'a> TerminalView<'a> {
                         modifiers,
                         ..
                     } => {
+                        if !preedit.is_empty()
+                            && !modifiers.command
+                            && !modifiers.ctrl
+                            && !modifiers.mac_cmd
+                        {
+                            // Let the IME consume composition keystrokes (radicals, numbers).
+                            continue;
+                        }
                         if is_paste_key(*key, *modifiers) {
                             continue;
                         }
@@ -476,6 +527,20 @@ impl<'a> TerminalView<'a> {
                 self.emulator.send_input(buf);
                 typing_active = true;
                 ui.data_mut(|d| d.insert_temp(typing_key, now));
+            }
+
+            ui.data_mut(|d| d.insert_temp(ime_key, preedit.clone()));
+            if !preedit.is_empty() {
+                paint_ime_preedit(
+                    &painter,
+                    origin,
+                    cell_width,
+                    row_height,
+                    snapshot.cursor,
+                    &preedit,
+                    &font_id,
+                );
+                typing_active = true;
             }
         }
 
@@ -735,6 +800,65 @@ fn render_terminal_scrollbar(
 /// Minimum combined `Event::Text` length in one frame to treat as a paste burst
 /// (some platforms inject clipboard content as many single-char Text events).
 const PASTE_BURST_MIN_LEN: usize = 16;
+
+fn ime_commit_texts(events: &[egui::Event]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|ev| match ev {
+            egui::Event::Ime(ImeEvent::Commit(text)) if !text.is_empty() => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn paint_ime_preedit(
+    painter: &egui::Painter,
+    origin: Pos2,
+    cell_width: f32,
+    row_height: f32,
+    cursor: (usize, usize),
+    preedit: &str,
+    font_id: &FontId,
+) {
+    let (cy, cx) = cursor;
+    let mut col = cx as f32;
+    let y = origin.y + cy as f32 * row_height;
+    let fg = Color32::from_rgb(0xea, 0xea, 0xea);
+    let bg = Color32::from_rgba_unmultiplied(0x55, 0x55, 0x88, 0xb0);
+    for ch in preedit.chars() {
+        if ch == '\n' || ch == '\r' {
+            continue;
+        }
+        let wide = unicode_char_wide(ch);
+        let w = if wide { cell_width * 2.0 } else { cell_width };
+        let x = origin.x + col * cell_width;
+        let rect = Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, row_height));
+        painter.rect_filled(rect, 0.0, bg);
+        painter.text(Pos2::new(x, y), egui::Align2::LEFT_TOP, ch, font_id.clone(), fg);
+        painter.line_segment(
+            [
+                Pos2::new(x, y + row_height - 1.0),
+                Pos2::new(x + w, y + row_height - 1.0),
+            ],
+            Stroke::new(1.0, fg),
+        );
+        col += if wide { 2.0 } else { 1.0 };
+    }
+}
+
+fn unicode_char_wide(ch: char) -> bool {
+    // East Asian wide / fullwidth — enough for CJK IME preedit.
+    matches!(ch as u32, 0x1100..=0x115F
+        | 0x2329..=0x232A
+        | 0x2E80..=0xA4CF
+        | 0xAC00..=0xD7A3
+        | 0xF900..=0xFAFF
+        | 0xFE10..=0xFE19
+        | 0xFE30..=0xFE6F
+        | 0xFF00..=0xFF60
+        | 0xFFE0..=0xFFE6
+        | 0x1F300..=0x1FAFF)
+}
 
 fn is_paste_key(key: Key, modifiers: Modifiers) -> bool {
     match key {

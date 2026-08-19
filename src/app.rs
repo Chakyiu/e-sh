@@ -15,6 +15,7 @@ use e_sh::config::store::{
     ConfigPaths, forget_secrets, hydrate_after_unlock, load_connections, save_connections,
 };
 use e_sh::config::shortcuts::AppShortcuts;
+use e_sh::config::fonts::install_fallback_fonts;
 use e_sh::config::theme::{Theme, apply_theme, load_theme};
 use e_sh::updater::{self, UpdateHandle, UpdateStatus};
 use e_sh::core::connection::{AuthMethod, Connection, ConnectionStore, Protocol};
@@ -93,7 +94,9 @@ pub struct EshApp {
 }
 
 impl EshApp {
-    pub fn new(_cc: &CreationContext<'_>, rt: Handle) -> Self {
+    pub fn new(cc: &CreationContext<'_>, rt: Handle) -> Self {
+        install_fallback_fonts(&cc.egui_ctx);
+
         let paths = Arc::new(ConfigPaths::discover().expect("config paths"));
         let update_handle = updater::spawn_update_check(&rt);
         let current_theme = load_theme(&paths.config_dir);

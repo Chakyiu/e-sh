@@ -176,14 +176,18 @@ impl TerminalEmulator {
             let selected = selection_range
                 .map(|r| r.contains(indexed.point))
                 .unwrap_or(false);
+            let flags = indexed.cell.flags;
             rows[line_idx].push(RenderCell {
                 ch: indexed.cell.c,
                 fg: resolve_color(indexed.cell.fg, true),
                 bg: resolve_color(indexed.cell.bg, false),
-                bold: indexed.cell.flags.contains(Flags::BOLD),
-                italic: indexed.cell.flags.contains(Flags::ITALIC),
-                underline: indexed.cell.flags.intersects(Flags::ALL_UNDERLINES),
+                bold: flags.contains(Flags::BOLD),
+                italic: flags.contains(Flags::ITALIC),
+                underline: flags.intersects(Flags::ALL_UNDERLINES),
                 selected,
+                wide: flags.contains(Flags::WIDE_CHAR),
+                spacer: flags
+                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER),
             });
         }
 
@@ -490,6 +494,10 @@ pub struct RenderCell {
     pub italic: bool,
     pub underline: bool,
     pub selected: bool,
+    /// Fullwidth / CJK cell that occupies two columns.
+    pub wide: bool,
+    /// Trailing (or leading wrap) spacer for a wide cell — draw background only.
+    pub spacer: bool,
 }
 
 fn resolve_color(color: Color, foreground: bool) -> [u8; 3] {
