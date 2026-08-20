@@ -3,7 +3,7 @@
 //! Connects to a VNC server, receives framebuffer updates, and forwards
 //! mouse/keyboard input from the egui UI.
 
-use std::io::{Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,6 +12,10 @@ use des::cipher::{BlockCipherEncrypt, KeyInit};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::core::connection::{AuthMethod, Connection};
+use crate::proto::vnc_enc::{
+    self, TightStreams, ENCODING_COPYRECT, ENCODING_HEXTILE, ENCODING_RAW, ENCODING_TIGHT,
+    ENCODING_ZLIB, ENCODING_ZRLE,
+};
 
 /// A rectangular region of the framebuffer received from the server.
 #[derive(Clone)]
@@ -111,9 +115,6 @@ const SERVER_SET_COLOUR_MAP: u8 = 1;
 const SERVER_BELL: u8 = 2;
 const SERVER_CUT_TEXT: u8 = 3;
 
-// Encoding types
-const ENCODING_RAW: i32 = 0;
-const ENCODING_COPYRECT: i32 = 1;
 
 // ---------------------------------------------------------------------------
 // VNC (DES) authentication challenge-response
@@ -325,19 +326,21 @@ fn run_vnc_session(
         stream.flush()?;
     }
 
-    // --- Set encodings (Raw + CopyRect) ---
+    // Prefer compressed encodings. Servers pick the first they support.
     {
-        let mut msg = [0u8; 12];
-        msg[0] = CLIENT_SET_ENCODINGS;
-        // padding: 1
-        // number of encodings: 2
-        msg[2] = 0; msg[3] = 2;
-        // CopyRect
-        let cr = ENCODING_COPYRECT.to_be_bytes();
-        msg[4..8].copy_from_slice(&cr);
-        // Raw
-        let raw = ENCODING_RAW.to_be_bytes();
-        msg[8..12].copy_from_slice(&raw);
+        let encodings = [
+            ENCODING_TIGHT,
+            ENCODING_ZRLE,
+            ENCODING_HEXTILE,
+            ENCODING_ZLIB,
+            ENCODING_COPYRECT,
+            ENCODING_RAW,
+        ];
+        let mut msg = vec![CLIENT_SET_ENCODINGS, 0];
+        msg.extend_from_slice(&(encodings.len() as u16).to_be_bytes());
+        for enc in encodings {
+            msg.extend_from_slice(&enc.to_be_bytes());
+        }
         stream.write_all(&msg)?;
         stream.flush()?;
     }
@@ -347,57 +350,38 @@ fn run_vnc_session(
         height: fb_height,
     });
 
-    // Request initial full framebuffer update
     send_fb_update_request(&mut stream, false, 0, 0, fb_width, fb_height)?;
 
-    // Clone stream for the writer thread
     let writer_stream = stream.try_clone()?;
+    let mut req_stream = stream.try_clone()?;
     let cmd_rx = std::sync::Mutex::new(cmd_rx);
 
     let writer_thread = std::thread::spawn(move || {
         vnc_writer_loop(writer_stream, cmd_rx, fb_width, fb_height);
     });
 
-    // Reader loop
-    //
-    // We use a short read timeout ONLY for the 1-byte message-type probe.
-    // Once we know a message is arriving, we switch back to blocking mode
-    // so that `read_exact` on the payload never fails with EAGAIN mid-read.
-    let probe_timeout = Some(std::time::Duration::from_millis(100));
+    let mut stream = BufReader::with_capacity(128 * 1024, stream);
     let mut framebuffer = vec![0u8; fb_width as usize * fb_height as usize * 4];
+    let mut tight = TightStreams::default();
     loop {
         if shutdown.load(Ordering::Relaxed) {
             break;
         }
 
-        // Probe for the next message type byte with a timeout
-        stream.set_read_timeout(probe_timeout).ok();
         let mut msg_type = [0u8; 1];
-        match stream.read(&mut msg_type) {
-            Ok(0) => {
-                let _ = event_tx.send(VncEvent::Closed(Some("server closed connection".into())));
-                break;
-            }
-            Ok(_) => {
-                // Got data — switch to blocking for the rest of this message
-                stream.set_read_timeout(None).ok();
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
-                   || e.kind() == std::io::ErrorKind::TimedOut => {
-                // Timeout — re-request an incremental update and keep waiting
-                if shutdown.load(Ordering::Relaxed) {
-                    break;
-                }
-                // Switch to blocking briefly to send the request
-                stream.set_read_timeout(None).ok();
-                let _ = send_fb_update_request(&mut stream, true, 0, 0, fb_width, fb_height);
-                continue;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+        match stream.read_exact(&mut msg_type) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof
+                || e.kind() == std::io::ErrorKind::ConnectionAborted
+                || e.kind() == std::io::ErrorKind::ConnectionReset =>
+            {
                 let _ = event_tx.send(VncEvent::Closed(Some("server closed connection".into())));
                 break;
             }
             Err(e) => {
+                if shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
                 let _ = event_tx.send(VncEvent::Closed(Some(format!("read error: {e}"))));
                 break;
             }
@@ -405,7 +389,6 @@ fn run_vnc_session(
 
         match msg_type[0] {
             SERVER_FB_UPDATE => {
-                // padding: 1 byte
                 let mut header = [0u8; 3];
                 stream.read_exact(&mut header)?;
                 let num_rects = u16::from_be_bytes([header[1], header[2]]);
@@ -421,59 +404,34 @@ fn run_vnc_session(
                         rect_header[8], rect_header[9], rect_header[10], rect_header[11],
                     ]);
 
-                    match encoding {
-                        ENCODING_RAW => {
-                            let pixel_count = w as usize * h as usize;
-                            let byte_count = pixel_count * 4; // 32bpp
-                            let mut pixel_data = vec![0u8; byte_count];
-                            stream.read_exact(&mut pixel_data)?;
-
-                            // Convert from server pixel format (RGBX) to RGBA
-                            let mut rgba = vec![0u8; pixel_count * 4];
-                            for i in 0..pixel_count {
-                                let si = i * 4;
-                                rgba[si] = pixel_data[si];       // R
-                                rgba[si + 1] = pixel_data[si + 1]; // G
-                                rgba[si + 2] = pixel_data[si + 2]; // B
-                                rgba[si + 3] = 255;                // A
-                            }
-
-                            // Blit into local framebuffer
-                            blit_rect(&mut framebuffer, fb_width, x, y, w, h, &rgba);
-
-                            let _ = event_tx.send(VncEvent::Bitmap(VncBitmapRegion {
-                                x, y, width: w, height: h, data: rgba,
-                            }));
-                        }
+                    let rgba = match encoding {
+                        ENCODING_RAW => vnc_enc::read_raw_rgba(&mut stream, w, h)?,
+                        ENCODING_HEXTILE => vnc_enc::read_hextile(&mut stream, w, h)?,
+                        ENCODING_ZLIB => vnc_enc::read_zlib(&mut stream, w, h)?,
+                        ENCODING_ZRLE => vnc_enc::read_zrle(&mut stream, w, h)?,
+                        ENCODING_TIGHT => vnc_enc::read_tight(&mut stream, w, h, &mut tight)?,
                         ENCODING_COPYRECT => {
                             let mut src = [0u8; 4];
                             stream.read_exact(&mut src)?;
                             let src_x = u16::from_be_bytes([src[0], src[1]]);
                             let src_y = u16::from_be_bytes([src[2], src[3]]);
-
-                            // Copy from framebuffer
-                            let rgba = copy_rect(
-                                &framebuffer, fb_width, fb_height,
-                                src_x, src_y, w, h,
-                            );
-                            blit_rect(&mut framebuffer, fb_width, x, y, w, h, &rgba);
-
-                            let _ = event_tx.send(VncEvent::Bitmap(VncBitmapRegion {
-                                x, y, width: w, height: h, data: rgba,
-                            }));
+                            copy_rect(&framebuffer, fb_width, src_x, src_y, w, h)
                         }
                         _ => {
-                            // Unknown encoding — skip (we can't know the size, so bail)
                             let _ = event_tx.send(VncEvent::Closed(Some(
                                 format!("unsupported encoding: {encoding}")
                             )));
-                            break;
+                            return Ok(());
                         }
-                    }
+                    };
+
+                    blit_rect(&mut framebuffer, fb_width, x, y, w, h, &rgba);
+                    let _ = event_tx.send(VncEvent::Bitmap(VncBitmapRegion {
+                        x, y, width: w, height: h, data: rgba,
+                    }));
                 }
 
-                // Request incremental update
-                send_fb_update_request(&mut stream, true, 0, 0, fb_width, fb_height)?;
+                send_fb_update_request(&mut req_stream, true, 0, 0, fb_width, fb_height)?;
             }
             SERVER_SET_COLOUR_MAP => {
                 // Skip: padding(1) + first-colour(2) + num-colours(2)
@@ -502,7 +460,7 @@ fn run_vnc_session(
         }
     }
 
-    let _ = stream.shutdown(std::net::Shutdown::Both);
+    let _ = req_stream.shutdown(std::net::Shutdown::Both);
     let _ = writer_thread.join();
     Ok(())
 }
@@ -582,6 +540,7 @@ fn vnc_writer_loop(
                 let _ = send_fb_update_request(&mut stream, false, 0, 0, fb_width, fb_height);
             }
             VncCommand::Shutdown => {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
                 break;
             }
         }
@@ -595,36 +554,44 @@ fn blit_rect(
     data: &[u8],
 ) {
     let fbw = fb_width as usize;
+    let rw = w as usize;
+    let copy_w = rw.min(fbw.saturating_sub(x as usize));
+    if copy_w == 0 {
+        return;
+    }
+    let row_bytes = copy_w * 4;
     for row in 0..h as usize {
         let dst_y = y as usize + row;
-        for col in 0..w as usize {
-            let dst_x = x as usize + col;
-            let src_idx = (row * w as usize + col) * 4;
-            let dst_idx = (dst_y * fbw + dst_x) * 4;
-            if src_idx + 4 <= data.len() && dst_idx + 4 <= framebuffer.len() {
-                framebuffer[dst_idx..dst_idx + 4].copy_from_slice(&data[src_idx..src_idx + 4]);
-            }
+        let src = row * rw * 4;
+        let dst = (dst_y * fbw + x as usize) * 4;
+        if src + row_bytes > data.len() || dst + row_bytes > framebuffer.len() {
+            break;
         }
+        framebuffer[dst..dst + row_bytes].copy_from_slice(&data[src..src + row_bytes]);
     }
 }
 
 fn copy_rect(
     framebuffer: &[u8],
-    fb_width: u16, _fb_height: u16,
+    fb_width: u16,
     src_x: u16, src_y: u16, w: u16, h: u16,
 ) -> Vec<u8> {
     let fbw = fb_width as usize;
-    let mut data = vec![0u8; w as usize * h as usize * 4];
-    for row in 0..h as usize {
-        let sy = src_y as usize + row;
-        for col in 0..w as usize {
-            let sx = src_x as usize + col;
-            let src_idx = (sy * fbw + sx) * 4;
-            let dst_idx = (row * w as usize + col) * 4;
-            if src_idx + 4 <= framebuffer.len() && dst_idx + 4 <= data.len() {
-                data[dst_idx..dst_idx + 4].copy_from_slice(&framebuffer[src_idx..src_idx + 4]);
-            }
+    let rw = w as usize;
+    let rh = h as usize;
+    let mut data = vec![0u8; rw * rh * 4];
+    let copy_w = rw.min(fbw.saturating_sub(src_x as usize));
+    if copy_w == 0 {
+        return data;
+    }
+    let row_bytes = copy_w * 4;
+    for row in 0..rh {
+        let src = ((src_y as usize + row) * fbw + src_x as usize) * 4;
+        let dst = row * rw * 4;
+        if src + row_bytes > framebuffer.len() || dst + row_bytes > data.len() {
+            break;
         }
+        data[dst..dst + row_bytes].copy_from_slice(&framebuffer[src..src + row_bytes]);
     }
     data
 }

@@ -16,6 +16,7 @@ pub struct RemoteFramebuffer {
     textures: Vec<Option<TextureHandle>>,
     dirty_tiles: Vec<bool>,
     texture_prefix: String,
+    tile_scratch: Vec<Color32>,
 }
 
 impl RemoteFramebuffer {
@@ -29,6 +30,7 @@ impl RemoteFramebuffer {
             textures: Vec::new(),
             dirty_tiles: Vec::new(),
             texture_prefix: texture_prefix.into(),
+            tile_scratch: Vec::new(),
         }
     }
 
@@ -66,6 +68,15 @@ impl RemoteFramebuffer {
         self.upload_dirty(ctx);
     }
 
+    pub fn fill_rgb(&mut self, r: u8, g: u8, b: u8) {
+        for px in self.pixels.chunks_exact_mut(4) {
+            px[0] = r;
+            px[1] = g;
+            px[2] = b;
+            px[3] = 255;
+        }
+    }
+
     pub fn mark_all_dirty(&mut self) {
         self.dirty_tiles.fill(true);
     }
@@ -94,6 +105,37 @@ impl RemoteFramebuffer {
         }
     }
 
+    /// Copy an RGBA rectangle into the framebuffer (row memcpy).
+    pub fn blit_rgba(&mut self, x: u16, y: u16, w: u16, h: u16, data: &[u8]) {
+        let fb_w = self.width as usize;
+        let fb_h = self.height as usize;
+        let rw = w as usize;
+        let rh = h as usize;
+        let rx = x as usize;
+        let ry = y as usize;
+        if self.pixels.len() != fb_w * fb_h * 4 || rw == 0 || rh == 0 {
+            return;
+        }
+        let copy_w = rw.min(fb_w.saturating_sub(rx));
+        if copy_w == 0 {
+            return;
+        }
+        let row_bytes = copy_w * 4;
+        for row in 0..rh {
+            let dst_y = ry + row;
+            if dst_y >= fb_h {
+                break;
+            }
+            let src = row * rw * 4;
+            let dst = (dst_y * fb_w + rx) * 4;
+            if src + row_bytes > data.len() || dst + row_bytes > self.pixels.len() {
+                break;
+            }
+            self.pixels[dst..dst + row_bytes].copy_from_slice(&data[src..src + row_bytes]);
+        }
+        self.mark_dirty_rect(x as u32, y as u32, w as u32, h as u32);
+    }
+
     /// Upload dirty tiles to the GPU. Returns true if anything was uploaded.
     pub fn upload_dirty(&mut self, ctx: &egui::Context) -> bool {
         if self.pixels.is_empty() {
@@ -118,14 +160,26 @@ impl RemoteFramebuffer {
                 let tw = TILE_SIZE.min(fb_w - x0);
                 let th = TILE_SIZE.min(fb_h - y0);
 
-                let mut tile_pixels = vec![0u8; tw * th * 4];
+                self.tile_scratch.clear();
+                self.tile_scratch.resize(tw * th, Color32::BLACK);
                 for row in 0..th {
                     let src = ((y0 + row) * fb_w + x0) * 4;
-                    let dst = row * tw * 4;
-                    tile_pixels[dst..dst + tw * 4].copy_from_slice(&self.pixels[src..src + tw * 4]);
+                    let dst = &mut self.tile_scratch[row * tw..row * tw + tw];
+                    // Color32 is packed RGBA; our framebuffer is already RGBA with A=255.
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            self.pixels[src..].as_ptr(),
+                            dst.as_mut_ptr() as *mut u8,
+                            tw * 4,
+                        );
+                    }
                 }
 
-                let image = ColorImage::from_rgba_unmultiplied([tw, th], &tile_pixels);
+                let image = ColorImage {
+                    size: [tw, th],
+                    source_size: vec2(tw as f32, th as f32),
+                    pixels: self.tile_scratch.clone(),
+                };
                 let name = format!("{}_{}_{}", self.texture_prefix, tx, ty);
                 match &mut self.textures[idx] {
                     Some(tex) => tex.set(image, TextureOptions::NEAREST),

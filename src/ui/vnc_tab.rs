@@ -82,48 +82,18 @@ impl VncTab {
         }
         if self.framebuffer.width() != self.width || self.framebuffer.height() != self.height {
             self.framebuffer.resize(self.width, self.height, ctx);
-            for pixel in self.framebuffer.pixels_mut().chunks_exact_mut(4) {
-                pixel[0] = 30;
-                pixel[1] = 30;
-                pixel[2] = 30;
-                pixel[3] = 255;
-            }
+            self.framebuffer.fill_rgb(30, 30, 30);
             self.framebuffer.mark_all_dirty();
         }
     }
 
     fn blit_region(&mut self, region: &crate::proto::vnc::VncBitmapRegion) {
-        let fb_w = self.width as usize;
-        let fb_h = self.height as usize;
-        let rw = region.width as usize;
-        let rh = region.height as usize;
-        let rx = region.x as usize;
-        let ry = region.y as usize;
-
-        if self.framebuffer.pixels().len() != fb_w * fb_h * 4 {
-            return;
-        }
-
-        let pixels = self.framebuffer.pixels_mut();
-        for row in 0..rh {
-            let dst_y = ry + row;
-            if dst_y >= fb_h {
-                break;
-            }
-            let src_row = row * rw * 4;
-            let dst_row = (dst_y * fb_w + rx) * 4;
-            let len = rw * 4;
-            if src_row + len > region.data.len() || dst_row + len > pixels.len() {
-                break;
-            }
-            pixels[dst_row..dst_row + len].copy_from_slice(&region.data[src_row..src_row + len]);
-        }
-
-        self.framebuffer.mark_dirty_rect(
-            region.x as u32,
-            region.y as u32,
-            region.width as u32,
-            region.height as u32,
+        self.framebuffer.blit_rgba(
+            region.x,
+            region.y,
+            region.width,
+            region.height,
+            &region.data,
         );
     }
 

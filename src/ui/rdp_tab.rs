@@ -91,19 +91,24 @@ impl RdpTab {
             return;
         }
         if self.framebuffer.width() != self.width || self.framebuffer.height() != self.height {
-            self.framebuffer
-                .resize(self.width, self.height, ctx);
-            for pixel in self.framebuffer.pixels_mut().chunks_exact_mut(4) {
-                pixel[0] = 30;
-                pixel[1] = 30;
-                pixel[2] = 30;
-                pixel[3] = 255;
-            }
+            self.framebuffer.resize(self.width, self.height, ctx);
+            self.framebuffer.fill_rgb(30, 30, 30);
             self.framebuffer.mark_all_dirty();
         }
     }
 
     fn blit_region(&mut self, region: &crate::proto::rdp::BitmapRegion) {
+        if region.bpp == 32 {
+            self.framebuffer.blit_rgba(
+                region.left,
+                region.top,
+                region.width,
+                region.height,
+                &region.data,
+            );
+            return;
+        }
+
         let fb_w = self.width as usize;
         let fb_h = self.height as usize;
         let rw = region.width as usize;
@@ -117,38 +122,25 @@ impl RdpTab {
 
         let src_bpp = region.bpp as usize;
         let src_bytes_per_pixel = src_bpp / 8;
+        if src_bytes_per_pixel == 0 {
+            return;
+        }
         let pixels = self.framebuffer.pixels_mut();
+        let copy_w = rw.min(fb_w.saturating_sub(rx));
 
         for row in 0..rh {
             let dst_y = ry + row;
             if dst_y >= fb_h {
                 break;
             }
-            for col in 0..rw {
-                let dst_x = rx + col;
-                if dst_x >= fb_w {
-                    break;
-                }
+            for col in 0..copy_w {
                 let src_idx = (row * rw + col) * src_bytes_per_pixel;
-                let dst_idx = (dst_y * fb_w + dst_x) * 4;
-
-                if src_idx + src_bytes_per_pixel > region.data.len() {
+                let dst_idx = (dst_y * fb_w + rx + col) * 4;
+                if src_idx + src_bytes_per_pixel > region.data.len() || dst_idx + 4 > pixels.len() {
                     break;
                 }
-                if dst_idx + 4 > pixels.len() {
-                    break;
-                }
-
                 match src_bpp {
-                    32 => {
-                        // BGRA -> RGBA
-                        pixels[dst_idx] = region.data[src_idx + 2];
-                        pixels[dst_idx + 1] = region.data[src_idx + 1];
-                        pixels[dst_idx + 2] = region.data[src_idx];
-                        pixels[dst_idx + 3] = 255;
-                    }
                     24 => {
-                        // BGR -> RGBA
                         pixels[dst_idx] = region.data[src_idx + 2];
                         pixels[dst_idx + 1] = region.data[src_idx + 1];
                         pixels[dst_idx + 2] = region.data[src_idx];
@@ -159,7 +151,6 @@ impl RdpTab {
                             region.data[src_idx],
                             region.data[src_idx + 1],
                         ]);
-                        // RGB565
                         let r = ((pixel >> 11) & 0x1F) as u8;
                         let g = ((pixel >> 5) & 0x3F) as u8;
                         let b = (pixel & 0x1F) as u8;
@@ -173,7 +164,6 @@ impl RdpTab {
                             region.data[src_idx],
                             region.data[src_idx + 1],
                         ]);
-                        // RGB555
                         let r = ((pixel >> 10) & 0x1F) as u8;
                         let g = ((pixel >> 5) & 0x1F) as u8;
                         let b = (pixel & 0x1F) as u8;
@@ -183,7 +173,6 @@ impl RdpTab {
                         pixels[dst_idx + 3] = 255;
                     }
                     _ => {
-                        // Unknown bpp, fill magenta
                         pixels[dst_idx] = 255;
                         pixels[dst_idx + 1] = 0;
                         pixels[dst_idx + 2] = 255;

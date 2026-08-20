@@ -109,7 +109,7 @@ alongside the main application.
   - Supports RFB protocol versions 3.3, 3.7, and 3.8
   - **VNC Authentication** (DES challenge-response) and **None** security types
   - Embedded framebuffer rendered as an egui texture with mouse, keyboard, and scroll wheel forwarding
-  - Handles Raw and CopyRect encodings
+  - Tight, ZRLE, Hextile, Zlib, CopyRect, and Raw encodings (servers pick the best they support)
   - Full keyboard input including typed characters (`!`, `@`, uppercase letters, etc.) via X11 keysym mapping
   - Scroll wheel support via RFB button 4/5 emulation
   - Periodic incremental framebuffer update requests to keep the display responsive during idle periods
@@ -158,7 +158,7 @@ alongside the main application.
 | SSH      | Interactive remote shell      | **Working** (password + pubkey + agent, TOFU, tunnels `-L`/`-R`/`-D`, chained ProxyJump, scrollback + copy/paste, encrypted secret store, opt-in asciicast v2 recording) |
 | SFTP     | Secure file transfer / browse | **Working** (dual-pane browser, drag-drop, recursive transfers, multi-select, filter, sortable/resizable columns, cancel, opt-in JSONL audit recording)                  |
 | RDP      | Remote desktop viewer         | **Working** (dual-backend: built-in IronRDP for Windows/xrdp with embedded viewer, auto-fallback to FreeRDP for GNOME Remote Desktop; NLA auth, dirty-region updates; SSH jump-host tunnel) |
-| VNC      | Remote desktop viewer         | **Working** (pure-Rust RFB client, VNC auth + None, Raw + CopyRect encodings, embedded viewer with full mouse/keyboard forwarding)                                       |
+| VNC      | Remote desktop viewer         | **Working** (pure-Rust RFB client, VNC auth + None, Tight/ZRLE/Hextile/Zlib/CopyRect/Raw, embedded viewer with full mouse/keyboard forwarding)                            |
 
 ## Architecture
 

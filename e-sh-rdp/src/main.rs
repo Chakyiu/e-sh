@@ -58,10 +58,15 @@ const CMD_SHUTDOWN: u8 = 13;
 const CMD_MOUSE_SCROLL: u8 = 14;
 
 fn write_msg(out: &mut impl Write, t: u8, p: &[u8]) -> io::Result<()> {
+    write_msg_nofllush(out, t, p)?;
+    out.flush()
+}
+
+fn write_msg_nofllush(out: &mut impl Write, t: u8, p: &[u8]) -> io::Result<()> {
     out.write_all(&[t])?;
     out.write_all(&(p.len() as u32).to_le_bytes())?;
     out.write_all(p)?;
-    out.flush()
+    Ok(())
 }
 
 fn main() {
@@ -237,7 +242,11 @@ async fn session(p: &Params, out: &mut impl Write) -> Result<()> {
         autologon: false,
         enable_audio_playback: false,
         license_cache: None,
-        performance_flags: Default::default(),
+        performance_flags: ironrdp::pdu::rdp::client_info::PerformanceFlags::DISABLE_WALLPAPER
+            | ironrdp::pdu::rdp::client_info::PerformanceFlags::DISABLE_FULLWINDOWDRAG
+            | ironrdp::pdu::rdp::client_info::PerformanceFlags::DISABLE_MENUANIMATIONS
+            | ironrdp::pdu::rdp::client_info::PerformanceFlags::DISABLE_CURSOR_SHADOW
+            | ironrdp::pdu::rdp::client_info::PerformanceFlags::ENABLE_FONT_SMOOTHING,
         timezone_info: Default::default(),
         compression_type: None,
         multitransport_flags: None,
@@ -352,6 +361,7 @@ async fn session(p: &Params, out: &mut impl Write) -> Result<()> {
             pdu_result = framed.read_pdu() => {
                 let (action, data) = pdu_result
                     .map_err(|e| anyhow::anyhow!("read: {e}"))?;
+                let mut sent_bitmap = false;
                 for o in stage
                     .process(&mut img, action, &data)
                     .map_err(|e| anyhow::anyhow!("process: {e}"))?
@@ -381,11 +391,19 @@ async fn session(p: &Params, out: &mut impl Write) -> Result<()> {
                             for row in reg_y..(reg_y + reg_h) {
                                 let start = row as usize * stride + reg_x as usize * 4;
                                 let end = start + reg_w as usize * 4;
-                                if end <= px.len() {
-                                    b.extend_from_slice(&px[start..end]);
+                                if end > px.len() {
+                                    continue;
+                                }
+                                // BgrX32 -> RGBA so the UI can memcpy.
+                                for chunk in px[start..end].chunks_exact(4) {
+                                    b.push(chunk[2]);
+                                    b.push(chunk[1]);
+                                    b.push(chunk[0]);
+                                    b.push(255);
                                 }
                             }
-                            write_msg(out, MSG_BITMAP, &b)?;
+                            write_msg_nofllush(out, MSG_BITMAP, &b)?;
+                            sent_bitmap = true;
                         }
                         ActiveStageOutput::Terminate(r) => {
                             write_msg(out, MSG_CLOSED, format!("{r:?}").as_bytes())?;
@@ -393,6 +411,9 @@ async fn session(p: &Params, out: &mut impl Write) -> Result<()> {
                         }
                         _ => {}
                     }
+                }
+                if sent_bitmap {
+                    out.flush()?;
                 }
             }
         }
@@ -469,18 +490,38 @@ fn build_freerdp_args(p: &Params, is_v3: bool) -> Vec<String> {
         }
     }
 
-    // Graphics pipeline (required for gnome-remote-desktop)
+    // Graphics pipeline (required for gnome-remote-desktop). Let the server
+    // pick AVC444 / AVC420 / RFX / progressive — do not pin AVC444-only,
+    // Homebrew builds often lack OpenH264.
     args.push("/gfx".into());
-    args.push("/gdi:sw".into());
-    args.push(format!("/bpp:{}", 32));
+    args.push("/rfx".into());
+    // Hardware GDI — `/gdi:sw` was the main source of a laggy FreeRDP window.
+    args.push("/gdi:hw".into());
 
-    // Security: accept certificates automatically
+    // Localhost is the SSH-jump tunnel; treat it as LAN so the server does
+    // not drop to a high-latency WAN profile.
+    if is_loopback_host(&p.host) {
+        args.push("/network:lan".into());
+    } else {
+        args.push("/network:auto".into());
+    }
+
     if is_v3 {
+        args.push("/cache:bitmap:on,glyph:on,offscreen:on".into());
         args.push("/cert:ignore".into());
     } else {
+        args.push("+bitmap-cache".into());
+        args.push("+glyph-cache".into());
+        args.push("+offscreen-cache".into());
         args.push("/cert-ignore".into());
         args.push("/cert-tofu".into());
     }
+
+    // Skip desktop chrome that burns bandwidth for no UX gain.
+    args.push("-wallpaper".into());
+    args.push("-menu-anims".into());
+    args.push("-window-drag".into());
+    args.push("+fonts".into());
 
     // NLA (CredSSP) — gnome-remote-desktop requires it
     match p.rdp_security_mode.as_str() {
@@ -501,6 +542,10 @@ fn build_freerdp_args(p: &Params, is_v3: bool) -> Vec<String> {
     args.push("/audio-mode:none".into());
 
     args
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]")
 }
 
 /// Detect whether the binary is FreeRDP 3.x by checking its version output.
@@ -545,6 +590,9 @@ async fn freerdp_session(p: &Params, out: &mut impl Write) -> Result<()> {
 
     let mut child = std::process::Command::new(&bin)
         .args(&args)
+        // SDL vsync adds a frame of display lag in sdl-freerdp.
+        .env("SDL_RENDER_VSYNC", "0")
+        .env("SDL_HINT_RENDER_VSYNC", "0")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
