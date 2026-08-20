@@ -98,6 +98,11 @@ const RFB_VERSION_3_8: &[u8] = b"RFB 003.008\n";
 const RFB_VERSION_3_7: &[u8] = b"RFB 003.007\n";
 const RFB_VERSION_3_3: &[u8] = b"RFB 003.003\n";
 
+/// Apple Screen Sharing uses unofficial RFB 003.889 (and sometimes 003.889 with a NUL).
+fn is_apple_vnc(server_version: &str) -> bool {
+    server_version.starts_with("RFB 003.889")
+}
+
 // Security types
 const SEC_NONE: u8 = 1;
 const SEC_VNC_AUTH: u8 = 2;
@@ -195,9 +200,10 @@ fn run_vnc_session(
     let mut version_buf = [0u8; 12];
     stream.read_exact(&mut version_buf)?;
 
-    // We always respond with 3.8 (or 3.7 / 3.3 if server is older)
+    // Apple Screen Sharing speaks RFB 003.889 but uses the 3.8 security handshake.
     let server_version = std::str::from_utf8(&version_buf).unwrap_or("");
-    let client_version = if server_version.starts_with("RFB 003.008") {
+    let apple_vnc = is_apple_vnc(server_version);
+    let client_version = if apple_vnc || server_version.starts_with("RFB 003.008") {
         RFB_VERSION_3_8
     } else if server_version.starts_with("RFB 003.007") {
         RFB_VERSION_3_7
@@ -234,6 +240,12 @@ fn run_vnc_session(
             SEC_NONE
         } else if types.contains(&SEC_VNC_AUTH) {
             SEC_VNC_AUTH
+        } else if apple_vnc {
+            return Err(anyhow::anyhow!(
+                "macOS Screen Sharing did not offer VNC password auth (types {types:?}). \
+                 Enable “VNC viewers may control screen with password” in \
+                 System Settings → General → Sharing → Screen Sharing."
+            ));
         } else {
             return Err(anyhow::anyhow!(
                 "no supported security type (server offered: {types:?})"
@@ -326,16 +338,20 @@ fn run_vnc_session(
         stream.flush()?;
     }
 
-    // Prefer compressed encodings. Servers pick the first they support.
+    // Servers pick the first encoding they support. macOS Screen Sharing
+    // advertises ZRLE/Zlib/Tight but its compressed payloads are not
+    // standard RFB — requesting them yields "incorrect header check".
     {
-        let encodings = [
-            ENCODING_TIGHT,
-            ENCODING_ZRLE,
-            ENCODING_HEXTILE,
-            ENCODING_ZLIB,
-            ENCODING_COPYRECT,
-            ENCODING_RAW,
-        ];
+        let encodings: &[i32] = if apple_vnc {
+            &[ENCODING_HEXTILE, ENCODING_COPYRECT, ENCODING_RAW]
+        } else {
+            &[
+                ENCODING_TIGHT,
+                ENCODING_HEXTILE,
+                ENCODING_COPYRECT,
+                ENCODING_RAW,
+            ]
+        };
         let mut msg = vec![CLIENT_SET_ENCODINGS, 0];
         msg.extend_from_slice(&(encodings.len() as u16).to_be_bytes());
         for enc in encodings {
@@ -594,4 +610,17 @@ fn copy_rect(
         data[dst..dst + row_bytes].copy_from_slice(&framebuffer[src..src + row_bytes]);
     }
     data
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apple_screen_sharing_version_is_detected() {
+        assert!(is_apple_vnc("RFB 003.889\n"));
+        assert!(is_apple_vnc("RFB 003.889\0"));
+        assert!(!is_apple_vnc("RFB 003.008\n"));
+        assert!(!is_apple_vnc("RFB 003.003\n"));
+    }
 }

@@ -21,19 +21,28 @@ const HEXTILE_FOREGROUND: u8 = 4;
 const HEXTILE_ANY_SUBRECTS: u8 = 8;
 const HEXTILE_COLOURED: u8 = 16;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TightZlib {
+    Unknown,
+    Raw,
+    Zlib,
+}
+
 pub struct TightStreams {
     streams: [Decompress; 4],
+    zlib: [TightZlib; 4],
 }
 
 impl Default for TightStreams {
     fn default() -> Self {
         Self {
             streams: [
-                Decompress::new(true),
-                Decompress::new(true),
-                Decompress::new(true),
-                Decompress::new(true),
+                Decompress::new(false),
+                Decompress::new(false),
+                Decompress::new(false),
+                Decompress::new(false),
             ],
+            zlib: [TightZlib::Unknown; 4],
         }
     }
 }
@@ -42,7 +51,8 @@ impl TightStreams {
     fn reset(&mut self, mask: u8) {
         for i in 0..4 {
             if mask & (1 << i) != 0 {
-                self.streams[i] = Decompress::new(true);
+                self.streams[i] = Decompress::new(false);
+                self.zlib[i] = TightZlib::Unknown;
             }
         }
     }
@@ -121,7 +131,7 @@ pub fn read_zlib(stream: &mut impl Read, w: u16, h: u16) -> Result<Vec<u8>> {
     let len = u32::from_be_bytes(len_buf) as usize;
     let mut comp = vec![0u8; len];
     stream.read_exact(&mut comp)?;
-    let raw = inflate_zlib(&comp, w as usize * h as usize * 4)?;
+    let raw = inflate_zlib_or_raw(&comp, w as usize * h as usize * 4)?;
     let mut rgba = raw;
     if rgba.len() < w as usize * h as usize * 4 {
         bail!("zlib rectangle too small");
@@ -139,7 +149,7 @@ pub fn read_zrle(stream: &mut impl Read, w: u16, h: u16) -> Result<Vec<u8>> {
     stream.read_exact(&mut comp)?;
     // Worst case: raw CPIXEL tiles (3 bytes) plus subencoding bytes.
     let estimate = w as usize * h as usize * 4 + 4096;
-    let data = inflate_zlib(&comp, estimate)?;
+    let data = inflate_zlib_or_raw(&comp, estimate)?;
     decode_zrle_tiles(&data, w, h)
 }
 
@@ -167,7 +177,13 @@ pub fn read_tight(
         let len = read_compact_len(stream)?;
         let mut jpeg = vec![0u8; len];
         stream.read_exact(&mut jpeg)?;
-        return decode_jpeg(&jpeg, w, h);
+        return decode_image(&jpeg, image::ImageFormat::Jpeg, w, h);
+    }
+    if comp_type == 0x0A {
+        let len = read_compact_len(stream)?;
+        let mut png = vec![0u8; len];
+        stream.read_exact(&mut png)?;
+        return decode_image(&png, image::ImageFormat::Png, w, h);
     }
 
     let stream_id = ((ctrl >> 4) & 0x03) as usize;
@@ -179,23 +195,32 @@ pub fn read_tight(
     }
 
     match filter {
-        0 => tight_copy(stream, w, h, &mut tight.streams[stream_id]),
-        1 => tight_palette(stream, w, h, &mut tight.streams[stream_id]),
-        2 => tight_gradient(stream, w, h, &mut tight.streams[stream_id]),
+        0 => tight_copy(stream, w, h, tight, stream_id),
+        1 => tight_palette(stream, w, h, tight, stream_id),
+        2 => tight_gradient(stream, w, h, tight, stream_id),
         other => bail!("unsupported Tight filter {other}"),
     }
 }
 
-fn tight_copy(stream: &mut impl Read, w: u16, h: u16, z: &mut Decompress) -> Result<Vec<u8>> {
-    let raw_len = w as usize * h as usize * 3;
-    let data = read_tight_data(stream, raw_len, z)?;
-    if data.len() < raw_len {
-        bail!("Tight copy data short");
-    }
-    Ok(tpixels_to_rgba(&data[..raw_len], w as usize * h as usize))
+fn tight_copy(
+    stream: &mut impl Read,
+    w: u16,
+    h: u16,
+    tight: &mut TightStreams,
+    id: usize,
+) -> Result<Vec<u8>> {
+    let count = w as usize * h as usize;
+    let data = read_tight_data(stream, count * 3, tight, id)?;
+    rgba_from_tpixels(&data, count)
 }
 
-fn tight_palette(stream: &mut impl Read, w: u16, h: u16, z: &mut Decompress) -> Result<Vec<u8>> {
+fn tight_palette(
+    stream: &mut impl Read,
+    w: u16,
+    h: u16,
+    tight: &mut TightStreams,
+    id: usize,
+) -> Result<Vec<u8>> {
     let mut n = [0u8; 1];
     stream.read_exact(&mut n)?;
     let colors = n[0] as usize + 1;
@@ -210,7 +235,7 @@ fn tight_palette(stream: &mut impl Read, w: u16, h: u16, z: &mut Decompress) -> 
         w as usize
     };
     let raw_len = row_bytes * h as usize;
-    let data = read_tight_data(stream, raw_len, z)?;
+    let data = read_tight_data(stream, raw_len, tight, id)?;
     if data.len() < raw_len {
         bail!("Tight palette data short");
     }
@@ -238,9 +263,15 @@ fn tight_palette(stream: &mut impl Read, w: u16, h: u16, z: &mut Decompress) -> 
     Ok(out)
 }
 
-fn tight_gradient(stream: &mut impl Read, w: u16, h: u16, z: &mut Decompress) -> Result<Vec<u8>> {
+fn tight_gradient(
+    stream: &mut impl Read,
+    w: u16,
+    h: u16,
+    tight: &mut TightStreams,
+    id: usize,
+) -> Result<Vec<u8>> {
     let raw_len = w as usize * h as usize * 3;
-    let data = read_tight_data(stream, raw_len, z)?;
+    let data = read_tight_data(stream, raw_len, tight, id)?;
     if data.len() < raw_len {
         bail!("Tight gradient data short");
     }
@@ -274,16 +305,79 @@ fn tight_gradient(stream: &mut impl Read, w: u16, h: u16, z: &mut Decompress) ->
     Ok(tpixels_to_rgba(&rgb, rw * rh))
 }
 
-fn read_tight_data(stream: &mut impl Read, uncompressed: usize, z: &mut Decompress) -> Result<Vec<u8>> {
+fn read_tight_data(
+    stream: &mut impl Read,
+    uncompressed: usize,
+    tight: &mut TightStreams,
+    id: usize,
+) -> Result<Vec<u8>> {
     if uncompressed < 12 {
         let mut raw = vec![0u8; uncompressed];
         stream.read_exact(&mut raw)?;
         return Ok(raw);
     }
     let len = read_compact_len(stream)?;
+    if len == 0 {
+        bail!("Tight compressed length is 0");
+    }
     let mut comp = vec![0u8; len];
     stream.read_exact(&mut comp)?;
-    inflate_into(z, &comp, uncompressed)
+    inflate_tight(tight, id, &comp, uncompressed)
+}
+
+fn inflate_tight(
+    tight: &mut TightStreams,
+    id: usize,
+    comp: &[u8],
+    hint: usize,
+) -> Result<Vec<u8>> {
+    match tight.zlib[id] {
+        TightZlib::Raw => inflate_into(&mut tight.streams[id], comp, hint)
+            .with_context(|| "Tight raw deflate"),
+        TightZlib::Zlib => inflate_into(&mut tight.streams[id], comp, hint)
+            .with_context(|| "Tight zlib"),
+        TightZlib::Unknown => {
+            let mut raw = Decompress::new(false);
+            if let Ok(v) = inflate_into(&mut raw, comp, hint) {
+                if tight_output_plausible(v.len(), hint) {
+                    tight.streams[id] = raw;
+                    tight.zlib[id] = TightZlib::Raw;
+                    return Ok(v);
+                }
+            }
+            let mut zlib = Decompress::new(true);
+            let v = inflate_into(&mut zlib, comp, hint).with_context(|| {
+                "Tight inflate failed as raw Deflate and as zlib"
+            })?;
+            tight.streams[id] = zlib;
+            tight.zlib[id] = TightZlib::Zlib;
+            Ok(v)
+        }
+    }
+}
+
+fn rgba_from_tpixels(data: &[u8], count: usize) -> Result<Vec<u8>> {
+    if data.len() >= count * 4 && data.len() != count * 3 {
+        let mut rgba = data[..count * 4].to_vec();
+        rgbx_to_rgba_inplace(&mut rgba);
+        return Ok(rgba);
+    }
+    if data.len() >= count * 3 {
+        return Ok(tpixels_to_rgba(&data[..count * 3], count));
+    }
+    bail!(
+        "Tight pixel data short: got {} bytes for {count} pixels",
+        data.len()
+    );
+}
+
+fn looks_like_zlib(data: &[u8]) -> bool {
+    if data.len() < 2 {
+        return false;
+    }
+    let cmf = data[0];
+    let flg = data[1];
+    (cmf & 0x0F) == 8 && (((cmf as u16) << 8) | flg as u16) % 31 == 0
 }
 
 fn read_compact_len(stream: &mut impl Read) -> Result<usize> {
@@ -506,12 +600,11 @@ fn unpack_palette(
     }
 }
 
-fn decode_jpeg(jpeg: &[u8], w: u16, h: u16) -> Result<Vec<u8>> {
-    let img = image::load_from_memory_with_format(jpeg, image::ImageFormat::Jpeg)
-        .context("Tight JPEG")?;
+fn decode_image(bytes: &[u8], format: image::ImageFormat, w: u16, h: u16) -> Result<Vec<u8>> {
+    let img = image::load_from_memory_with_format(bytes, format)
+        .with_context(|| format!("Tight {format:?}"))?;
     let rgba = img.to_rgba8();
     if rgba.width() != w as u32 || rgba.height() != h as u32 {
-        // Scale/crop is uncommon; copy what we can.
         let mut out = vec![0u8; w as usize * h as usize * 4];
         let cw = (rgba.width() as usize).min(w as usize);
         let ch = (rgba.height() as usize).min(h as usize);
@@ -525,22 +618,46 @@ fn decode_jpeg(jpeg: &[u8], w: u16, h: u16) -> Result<Vec<u8>> {
     Ok(rgba.into_raw())
 }
 
+fn tight_output_plausible(len: usize, hint: usize) -> bool {
+    if hint == 0 {
+        return len == 0;
+    }
+    // 3-byte or 4-byte TPIXEL, or a bit of zlib slack.
+    len == hint || len == hint * 4 / 3 || (len >= hint && len <= hint + hint / 2 + 32)
+}
+
 fn inflate_zlib(comp: &[u8], hint: usize) -> Result<Vec<u8>> {
     let mut z = Decompress::new(true);
-    inflate_into(&mut z, comp, hint)
+    inflate_into(&mut z, comp, hint).with_context(|| "ZRLE/Zlib encoding")
+}
+
+/// Standard ZRLE/Zlib is zlib-wrapped; a few servers send raw Deflate instead.
+fn inflate_zlib_or_raw(comp: &[u8], hint: usize) -> Result<Vec<u8>> {
+    match inflate_zlib(comp, hint) {
+        Ok(v) => Ok(v),
+        Err(zlib_err) => {
+            let mut raw = Decompress::new(false);
+            inflate_into(&mut raw, comp, hint).map_err(|_| zlib_err)
+        }
+    }
 }
 
 fn inflate_into(z: &mut Decompress, comp: &[u8], hint: usize) -> Result<Vec<u8>> {
     let mut out = vec![0u8; hint.max(64)];
     let mut written = 0usize;
+    let mut in_off = 0usize;
     loop {
+        if in_off > comp.len() {
+            bail!("zlib inflate: input offset past buffer");
+        }
         let before_in = z.total_in();
         let before_out = z.total_out();
         let status = z
-            .decompress(&comp[z.total_in() as usize..], &mut out[written..], FlushDecompress::Sync)
+            .decompress(&comp[in_off..], &mut out[written..], FlushDecompress::Sync)
             .map_err(|e| anyhow!("zlib inflate: {e}"))?;
+        in_off += (z.total_in() - before_in) as usize;
         written += (z.total_out() - before_out) as usize;
-        if status == Status::StreamEnd || z.total_in() as usize >= comp.len() {
+        if status == Status::StreamEnd || in_off >= comp.len() {
             break;
         }
         if z.total_in() == before_in && z.total_out() == before_out {
@@ -642,5 +759,35 @@ mod tests {
         let out = read_zlib(&mut msg.as_slice(), 2, 2).unwrap();
         assert_eq!(out.len(), 16);
         assert_eq!(out[3], 255);
+    }
+
+    #[test]
+    fn tight_raw_deflate_sync_flush_two_rects() {
+        use flate2::{Compress, FlushCompress};
+        let mut enc = Compress::new(Compression::default(), false);
+        let mut deflate = |plain: &[u8]| {
+            let mut out = vec![0u8; 128];
+            let before = enc.total_out();
+            enc.compress(plain, &mut out, FlushCompress::Sync).unwrap();
+            let n = (enc.total_out() - before) as usize;
+            out.truncate(n);
+            out
+        };
+        let a = deflate(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        let b = deflate(&[9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 1, 2]);
+        assert!(!looks_like_zlib(&a));
+        let mut z = Decompress::new(false);
+        let out_a = inflate_into(&mut z, &a, 12).unwrap();
+        let out_b = inflate_into(&mut z, &b, 12).unwrap();
+        assert_eq!(out_a, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(out_b, vec![9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 1, 2]);
+    }
+
+    #[test]
+    fn zlib_header_is_detected() {
+        let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(&[1, 2, 3, 4]).unwrap();
+        let comp = enc.finish().unwrap();
+        assert!(looks_like_zlib(&comp));
     }
 }
