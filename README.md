@@ -77,6 +77,7 @@ alongside the main application.
   - Per-connection ordered hop list (max depth 8), reorderable in the edit dialog
   - True SSH-in-SSH via nested handshakes over `direct-tcpip` channels
   - Live "Resolved path" preview in the edit dialog
+  - **RDP** uses the same hop list: SSH to the last hop, then a local port forward to the RDP host (MobaXterm-style)
 
 - **SFTP** dual-pane file browser:
   - `russh-sftp` 2.1.1 backend, opens its own SSH session per tab (independent of any shell tab)
@@ -92,6 +93,7 @@ alongside the main application.
   - Folder / file / symlink icons; size auto-formatted (B / K / M / G / T)
 
 - **RDP** remote desktop viewer:
+  - **RDP via SSH jump hosts** — same hop list as SSH/SFTP; e-sh opens a local port forward (`-L`) through the last hop and connects IronRDP/FreeRDP to `127.0.0.1`. NLA still uses the real RDP hostname.
   - Dual-backend architecture via the `e-sh-rdp` helper binary:
     - **IronRDP** (built-in, Rust-native) — embedded framebuffer rendered as an egui texture with mouse, keyboard, and scroll wheel forwarding; works with Windows RDP and xrdp
     - **FreeRDP** (external) — spawns `sdl-freerdp` / `xfreerdp` as a separate window; required for servers that mandate the Graphics Pipeline (e.g. GNOME Remote Desktop / grd)
@@ -155,7 +157,7 @@ alongside the main application.
 | -------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | SSH      | Interactive remote shell      | **Working** (password + pubkey + agent, TOFU, tunnels `-L`/`-R`/`-D`, chained ProxyJump, scrollback + copy/paste, encrypted secret store, opt-in asciicast v2 recording) |
 | SFTP     | Secure file transfer / browse | **Working** (dual-pane browser, drag-drop, recursive transfers, multi-select, filter, sortable/resizable columns, cancel, opt-in JSONL audit recording)                  |
-| RDP      | Remote desktop viewer         | **Working** (dual-backend: built-in IronRDP for Windows/xrdp with embedded viewer, auto-fallback to FreeRDP for GNOME Remote Desktop; NLA auth, dirty-region updates)    |
+| RDP      | Remote desktop viewer         | **Working** (dual-backend: built-in IronRDP for Windows/xrdp with embedded viewer, auto-fallback to FreeRDP for GNOME Remote Desktop; NLA auth, dirty-region updates; SSH jump-host tunnel) |
 | VNC      | Remote desktop viewer         | **Working** (pure-Rust RFB client, VNC auth + None, Raw + CopyRect encodings, embedded viewer with full mouse/keyboard forwarding)                                       |
 
 ## Architecture
@@ -177,7 +179,7 @@ src/
 ├── proto/
 │   ├── ssh.rs              russh client, host-key verifier, PTY session
 │   ├── sftp.rs             russh-sftp client, recursive transfers, cancel registry
-│   ├── rdp.rs              RDP session manager — spawns e-sh-rdp helper, binary protocol bridge
+│   ├── rdp.rs              RDP session manager — optional SSH jump tunnel, then e-sh-rdp helper
 │   └── vnc.rs              Pure-Rust VNC (RFB) client — auth, framebuffer updates, input forwarding
 └── ui/
     ├── connection_tree.rs  Left-side tree + "+" button
@@ -356,6 +358,17 @@ once.
 - **Drag and drop** files or folders from your OS into either pane to upload / move into the current directory. Folder transfers recurse automatically.
 - The bottom **Transfers** strip shows progress, bytes, and a per-transfer **Cancel** button. Use _Clear finished_ to prune completed rows.
 
+### RDP via SSH jump host
+
+Same idea as MobaXterm: SSH to a bastion, forward a local port to the RDP host, then connect the viewer to that port.
+
+1. Save an **SSH** connection for the jump host (or each hop in a chain).
+2. Create (or edit) the **RDP** connection: Computer Name / port / username / password are the **Windows/RDP** target as seen from the last hop (often an internal hostname or `127.0.0.1` if RDP runs on the jump host itself).
+3. Open **Jump Host**, add the SSH hop(s) in order.
+4. Open the RDP connection. e-sh SSHs through the chain, binds `127.0.0.1:<ephemeral>`, forwards to `host:3389`, and points IronRDP/FreeRDP at localhost. NLA still uses the real RDP hostname.
+
+The jump-host SSH credentials come from each hop's saved connection, not from the RDP password field.
+
 ## Configuration
 
 Configuration is stored as TOML under the standard OS config directory:
@@ -411,7 +424,7 @@ desktops, persist host keys), but expect breaking changes to config formats and 
 - [x] Tabbed multi-session UI polish (split panes, drag-to-reorder)
 - [x] Connections tab UI polish (drag-to-reorder, grey, ellipsised and small text sub title)
 - [x] Session recording / logging (opt-in)
-- [x] RDP remote desktop viewer (dual-backend: IronRDP embedded + FreeRDP external fallback)
+- [x] RDP remote desktop viewer (dual-backend: IronRDP embedded + FreeRDP external fallback, SSH jump-host tunnel)
 - [x] VNC remote desktop viewer (pure-Rust RFB client, embedded viewer)
 - [x] Automatic update checker (GitHub Releases API, non-blocking)
 - [ ] Plugin / scripting hooks
@@ -429,7 +442,9 @@ the same on every OS.
 
 **Q: Does it support agent forwarding / jump hosts / X11 forwarding?**
 Chained jump hosts (ProxyJump) are supported today with up to 8 hops per
-connection. SSH agent forwarding and X11 forwarding are not yet implemented.
+connection, including **RDP via SSH** (local port forward through the last hop,
+then RDP to `127.0.0.1`). SSH agent forwarding and X11 forwarding are not yet
+implemented.
 
 **Q: How does the RDP dual-backend work?**
 `e-sh` ships a helper binary (`e-sh-rdp`) that handles the RDP protocol. In

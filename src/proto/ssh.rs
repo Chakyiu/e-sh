@@ -19,7 +19,7 @@ use crate::config::host_keys::{
     HostKeyDecision, HostKeyPrompt, HostKeyPromptKind, HostKeyStore, HostKeyVerdict,
 };
 use crate::config::store::ConfigPaths;
-use crate::core::connection::{AuthMethod, Connection, Tunnel, TunnelKind};
+use crate::core::connection::{AuthMethod, Connection, Protocol, Tunnel, TunnelKind};
 
 pub enum SessionEvent {
     Output(Vec<u8>),
@@ -453,6 +453,127 @@ pub(crate) async fn establish_session(
     Ok((current, remote_forwards))
 }
 
+/// Local TCP listener that forwards each accepted connection through an SSH
+/// session (and optional jump chain) to `remote_host:remote_port`.
+///
+/// Dropping the handle aborts the accept loop and disconnects SSH.
+pub struct SshLocalForward {
+    pub local_port: u16,
+    session: Option<Arc<Handle<Client>>>,
+    accept: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for SshLocalForward {
+    fn drop(&mut self) {
+        if let Some(handle) = self.accept.take() {
+            handle.abort();
+        }
+        if let Some(session) = self.session.take()
+            && let Ok(rt) = tokio::runtime::Handle::try_current()
+        {
+            rt.spawn(async move {
+                let _ = session
+                    .disconnect(Disconnect::ByApplication, "forward closed", "en")
+                    .await;
+            });
+        }
+    }
+}
+
+/// Open `127.0.0.1:<ephemeral>` and forward to `remote_host:remote_port`
+/// via `direct-tcpip` on the last SSH hop.
+pub async fn open_local_forward(
+    mut hops: Vec<Connection>,
+    host_keys: HostKeyContext,
+    remote_host: String,
+    remote_port: u16,
+) -> Result<SshLocalForward> {
+    if hops.is_empty() {
+        return Err(anyhow!("open_local_forward requires at least one SSH hop"));
+    }
+    for hop in &hops {
+        if hop.protocol != Protocol::Ssh {
+            return Err(anyhow!(
+                "jump host '{}' is not an SSH connection",
+                hop.name
+            ));
+        }
+    }
+    // Keep the tunnel alive through idle RDP desktop sessions.
+    if let Some(last) = hops.last_mut()
+        && last.keepalive_secs == 0
+    {
+        last.keepalive_secs = 30;
+    }
+
+    let (session, _) = establish_session(&hops, host_keys).await?;
+    let session = Arc::new(session);
+
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .context("binding local RDP forward on 127.0.0.1:0")?;
+    let local_port = listener.local_addr()?.port();
+    tracing::info!(
+        listen = %format!("127.0.0.1:{local_port}"),
+        target = %format!("{remote_host}:{remote_port}"),
+        hops = hops.len(),
+        "SSH local forward for tunneled session"
+    );
+
+    let accept = spawn_local_forward_accept(
+        session.clone(),
+        listener,
+        remote_host,
+        remote_port,
+    );
+
+    Ok(SshLocalForward {
+        local_port,
+        session: Some(session),
+        accept: Some(accept),
+    })
+}
+
+fn spawn_local_forward_accept(
+    session: Arc<Handle<Client>>,
+    listener: TcpListener,
+    remote_host: String,
+    remote_port: u16,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let (mut local, peer) = match listener.accept().await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(error = %e, "local tunnel accept failed");
+                    break;
+                }
+            };
+            let session = session.clone();
+            let remote_host = remote_host.clone();
+            tokio::spawn(async move {
+                let channel = match session
+                    .channel_open_direct_tcpip(
+                        remote_host,
+                        remote_port as u32,
+                        peer.ip().to_string(),
+                        peer.port() as u32,
+                    )
+                    .await
+                {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "local tunnel channel open failed");
+                        return;
+                    }
+                };
+                let mut remote = channel.into_stream();
+                let _ = tokio::io::copy_bidirectional(&mut local, &mut remote).await;
+            });
+        }
+    })
+}
+
 async fn run_session(
     chain: Vec<Connection>,
     host_keys: HostKeyContext,
@@ -805,40 +926,12 @@ async fn start_tunnel(
                 })?;
             tracing::info!(target = %tunnel.describe(), "local tunnel listening");
             let bound = listener.local_addr().map(|a| a.port()).unwrap_or(tunnel.listen_port);
-            let remote_host = tunnel.remote_host.clone();
-            let remote_port = tunnel.remote_port;
-            let handle = tokio::spawn(async move {
-                loop {
-                    let (mut local, peer) = match listener.accept().await {
-                        Ok(v) => v,
-                        Err(e) => {
-                            tracing::warn!(error = %e, "local tunnel accept failed");
-                            break;
-                        }
-                    };
-                    let session = session.clone();
-                    let remote_host = remote_host.clone();
-                    tokio::spawn(async move {
-                        let channel = match session
-                            .channel_open_direct_tcpip(
-                                remote_host,
-                                remote_port as u32,
-                                peer.ip().to_string(),
-                                peer.port() as u32,
-                            )
-                            .await
-                        {
-                            Ok(c) => c,
-                            Err(e) => {
-                                tracing::warn!(error = %e, "local tunnel channel open failed");
-                                return;
-                            }
-                        };
-                        let mut remote = channel.into_stream();
-                        let _ = tokio::io::copy_bidirectional(&mut local, &mut remote).await;
-                    });
-                }
-            });
+            let handle = spawn_local_forward_accept(
+                session.clone(),
+                listener,
+                tunnel.remote_host.clone(),
+                tunnel.remote_port,
+            );
             Ok((handle, bound))
         }
         TunnelKind::Remote => {

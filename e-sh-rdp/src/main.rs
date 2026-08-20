@@ -9,6 +9,10 @@ use std::net::SocketAddr;
 struct Params {
     host: String,
     port: u16,
+    /// TLS SNI / NLA target name. Defaults to `host`. Use when TCP connects
+    /// to a local forward (`127.0.0.1`) but CredSSP must see the real server.
+    #[serde(default)]
+    server_name: Option<String>,
     username: String,
     password: String,
     width: u16,
@@ -34,6 +38,14 @@ fn default_resize_mode() -> String {
 
 fn default_security_mode() -> String {
     "negotiate".into()
+}
+
+fn effective_server_name(p: &Params) -> &str {
+    p.server_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&p.host)
 }
 
 const MSG_CONNECTED: u8 = 1;
@@ -231,7 +243,8 @@ async fn session(p: &Params, out: &mut impl Write) -> Result<()> {
         multitransport_flags: None,
     };
 
-    let sn = ServerName::new(&p.host);
+    let name = effective_server_name(p);
+    let sn = ServerName::new(name);
 
     let mut conn = ClientConnector::new(config, sock);
 
@@ -242,7 +255,7 @@ async fn session(p: &Params, out: &mut impl Write) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("connect_begin: {e}"))?;
 
     let tcp_inner = f.into_inner_no_leftover();
-    let (tls, cert) = ironrdp_tls::upgrade(tcp_inner, &p.host)
+    let (tls, cert) = ironrdp_tls::upgrade(tcp_inner, name)
         .await
         .context("TLS")?;
     let spk = ironrdp_tls::extract_tls_server_public_key(&cert)

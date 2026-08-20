@@ -213,6 +213,10 @@ impl EditConnectionDialog {
 
                     if matches!(self.draft.protocol, Protocol::Rdp) {
                         ui.add_space(12.0);
+                        self.sidebar_group(ui, "Common");
+                        self.sidebar_item(ui, Section::JumpHost);
+
+                        ui.add_space(12.0);
                         self.sidebar_group(ui, "Advanced");
                         self.sidebar_item(ui, Section::Security);
                         self.sidebar_item(ui, Section::Display);
@@ -294,7 +298,15 @@ impl EditConnectionDialog {
         {
             self.section = Section::Connection;
         }
-        if matches!(self.draft.protocol, Protocol::Rdp | Protocol::Vnc)
+        if matches!(self.draft.protocol, Protocol::Rdp)
+            && matches!(
+                self.section,
+                Section::Tunnels | Section::Session | Section::Recording
+            )
+        {
+            self.section = Section::Connection;
+        }
+        if matches!(self.draft.protocol, Protocol::Vnc)
             && matches!(
                 self.section,
                 Section::JumpHost | Section::Tunnels | Section::Session | Section::Recording
@@ -861,14 +873,26 @@ impl EditConnectionDialog {
                 });
             }
         }
+
+        if self.draft.protocol == Protocol::Rdp {
+            ui.add_space(10.0);
+            ui.label(
+                RichText::new(
+                    "This password is for the RDP host. Jump hosts use the SSH credentials saved on each hop.",
+                )
+                .small()
+                .weak(),
+            );
+        }
     }
 
     fn jump_host_pane(&mut self, ui: &mut egui::Ui, store: &ConnectionStore) {
-        self.pane_header(
-            ui,
-            "Jump Host",
-            "Tunnel through one or more saved SSH hosts (chained ProxyJump). Hops connect in order, top to bottom.",
-        );
+        let subtitle = if self.draft.protocol == Protocol::Rdp {
+            "SSH-tunnel this RDP session through saved SSH hosts (local port forward, like MobaXterm). Hops connect in order; the last hop opens a TCP channel to the RDP host — it does not SSH into Windows."
+        } else {
+            "Tunnel through one or more saved SSH hosts (chained ProxyJump). Hops connect in order, top to bottom."
+        };
+        self.pane_header(ui, "Jump Host", subtitle);
 
         let candidates: Vec<&Connection> = store
             .connections
@@ -989,8 +1013,15 @@ impl EditConnectionDialog {
                 })
                 .collect();
             path.push(format!(
-                "{}@{}:{}",
-                self.draft.username, self.draft.host, self.draft.port
+                "{}@{}:{}{}",
+                self.draft.username,
+                self.draft.host,
+                self.draft.port,
+                if self.draft.protocol == Protocol::Rdp {
+                    " (RDP tunnel)"
+                } else {
+                    ""
+                }
             ));
             ui.label(RichText::new(path.join("  ->  ")).monospace());
         }

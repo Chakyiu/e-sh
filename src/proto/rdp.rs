@@ -9,6 +9,7 @@ use std::process::{Command, Stdio};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::core::connection::{AuthMethod, Connection};
+use crate::proto::ssh::{HostKeyContext, open_local_forward};
 
 // Message types (helper -> app)
 const MSG_CONNECTED: u8 = 1;
@@ -60,17 +61,53 @@ pub struct RdpHandle {
     pub commands: UnboundedSender<RdpCommand>,
 }
 
+impl Drop for RdpHandle {
+    fn drop(&mut self) {
+        let _ = self.commands.send(RdpCommand::Shutdown);
+    }
+}
+
 pub fn spawn_rdp_session(
     rt: &tokio::runtime::Handle,
     conn: Connection,
+    jump_hops: Vec<Connection>,
+    host_keys: HostKeyContext,
 ) -> RdpHandle {
     let (event_tx, event_rx) = unbounded_channel::<RdpEvent>();
     let (cmd_tx, cmd_rx) = unbounded_channel::<RdpCommand>();
 
     let event_tx_task = event_tx.clone();
     rt.spawn(async move {
+        let server_name = conn.host.clone();
+        let forward = if jump_hops.is_empty() {
+            None
+        } else {
+            match open_local_forward(jump_hops, host_keys, conn.host.clone(), conn.port).await {
+                Ok(fwd) => {
+                    tracing::info!(
+                        local_port = fwd.local_port,
+                        rdp = %format!("{server_name}:{}", conn.port),
+                        "RDP SSH jump tunnel listening"
+                    );
+                    Some(fwd)
+                }
+                Err(e) => {
+                    let _ = event_tx.send(RdpEvent::Closed(Some(format!(
+                        "SSH jump tunnel failed: {e:#}"
+                    ))));
+                    return;
+                }
+            }
+        };
+
+        let mut helper_conn = conn;
+        if let Some(ref fwd) = forward {
+            helper_conn.host = "127.0.0.1".into();
+            helper_conn.port = fwd.local_port;
+        }
+
         let result = tokio::task::spawn_blocking(move || {
-            run_rdp_helper(conn, event_tx_task.clone(), cmd_rx)
+            run_rdp_helper(helper_conn, server_name, event_tx_task.clone(), cmd_rx)
         }).await;
 
         match result {
@@ -82,6 +119,7 @@ pub fn spawn_rdp_session(
                 let _ = event_tx.send(RdpEvent::Closed(Some(format!("task panicked: {e}"))));
             }
         }
+        drop(forward);
     });
 
     RdpHandle { events: event_rx, commands: cmd_tx }
@@ -114,6 +152,7 @@ fn find_helper_binary() -> Option<std::path::PathBuf> {
 
 fn run_rdp_helper(
     conn: Connection,
+    server_name: String,
     event_tx: UnboundedSender<RdpEvent>,
     cmd_rx: UnboundedReceiver<RdpCommand>,
 ) -> anyhow::Result<()> {
@@ -130,6 +169,7 @@ fn run_rdp_helper(
     let params = serde_json::json!({
         "host": conn.host,
         "port": conn.port,
+        "server_name": server_name,
         "username": conn.username,
         "password": password,
         "width": conn.rdp_width,

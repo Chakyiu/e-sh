@@ -372,7 +372,17 @@ impl EshApp {
         let Some(conn) = self.store.find(id).cloned() else {
             return;
         };
-        if connection_needs_secret(&conn) && self.secrets.is_none() {
+        let hops = match self.store.resolve_jump_hops(id) {
+            Ok(h) => h,
+            Err(e) => {
+                self.status = format!("Jump host error: {e}");
+                self.toaster.error("Jump host error", e.to_string());
+                return;
+            }
+        };
+        if self.secrets.is_none()
+            && (connection_needs_secret(&conn) || hops.iter().any(connection_needs_secret))
+        {
             self.pending.push_back(PendingAction::Open(id));
             self.ensure_secrets_unlocked(if SecretStore::file_exists(&self.paths.config_dir) {
                 MasterPasswordMode::Unlock
@@ -383,7 +393,13 @@ impl EshApp {
         }
         let label = format!("{}@{}:{}", conn.username, conn.host, conn.port);
         let title = format!("{} (RDP)", conn.name);
-        let handle = spawn_rdp_session(&self.rt, conn);
+        let via_jump = !hops.is_empty();
+        let host_ctx = HostKeyContext {
+            store: self.host_keys.clone(),
+            paths: self.paths.clone(),
+            prompts: self.host_key_prompt_tx.clone(),
+        };
+        let handle = spawn_rdp_session(&self.rt, conn, hops, host_ctx);
         let tab = EshTab::Rdp(RdpTab::new(
             Uuid::new_v4(),
             Some(id),
@@ -393,7 +409,11 @@ impl EshApp {
         ));
         self.push_tab(tab);
         self.status = format!("Opened RDP {label}");
-        self.toaster.info("RDP", format!("Connecting to {label}"));
+        if via_jump {
+            self.toaster.info("RDP", format!("Connecting to {label} via SSH jump"));
+        } else {
+            self.toaster.info("RDP", format!("Connecting to {label}"));
+        }
     }
 
     fn launch_vnc(&mut self, id: Uuid) {

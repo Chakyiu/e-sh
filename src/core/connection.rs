@@ -413,6 +413,19 @@ impl ConnectionStore {
         chain.push(target_conn);
         Ok(chain)
     }
+
+    /// SSH hops only (excludes the target). Used when the target is RDP/VNC
+    /// and we tunnel TCP through the last hop instead of SSHing into it.
+    pub fn resolve_jump_hops(&self, target: Uuid) -> Result<Vec<Connection>, JumpChainError> {
+        let mut chain = self.resolve_jump_chain(target)?;
+        let _target = chain.pop();
+        for hop in &chain {
+            if hop.protocol != Protocol::Ssh {
+                return Err(JumpChainError::NotSsh(hop.name.clone()));
+            }
+        }
+        Ok(chain)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -423,4 +436,85 @@ pub enum JumpChainError {
     Cycle,
     #[error("jump host chain too deep (max 8)")]
     TooDeep,
+    #[error("jump host '{0}' is not an SSH connection")]
+    NotSsh(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ssh(name: &str, host: &str) -> Connection {
+        Connection::new_ssh(name, host, "u")
+    }
+
+    fn rdp_via(name: &str, host: &str, hops: Vec<Uuid>) -> Connection {
+        let mut conn = Connection::new_ssh(name, host, "rdpuser");
+        conn.protocol = Protocol::Rdp;
+        conn.port = 3389;
+        conn.jump_chain = hops;
+        conn
+    }
+
+    #[test]
+    fn resolve_jump_hops_excludes_rdp_target() {
+        let mut store = ConnectionStore::default();
+        let jump = ssh("bastion", "1.2.3.4");
+        let jump_id = jump.id;
+        let rdp = rdp_via("win", "10.0.0.8", vec![jump_id]);
+        let rdp_id = rdp.id;
+        store.add(jump);
+        store.add(rdp);
+
+        let hops = store.resolve_jump_hops(rdp_id).unwrap();
+        assert_eq!(hops.len(), 1);
+        assert_eq!(hops[0].id, jump_id);
+        assert_eq!(hops[0].protocol, Protocol::Ssh);
+
+        let full = store.resolve_jump_chain(rdp_id).unwrap();
+        assert_eq!(full.len(), 2);
+        assert_eq!(full[1].id, rdp_id);
+        assert_eq!(full[1].protocol, Protocol::Rdp);
+    }
+
+    #[test]
+    fn resolve_jump_hops_empty_when_direct() {
+        let mut store = ConnectionStore::default();
+        let rdp = rdp_via("win", "10.0.0.8", vec![]);
+        let rdp_id = rdp.id;
+        store.add(rdp);
+        assert!(store.resolve_jump_hops(rdp_id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn resolve_jump_hops_rejects_non_ssh() {
+        let mut store = ConnectionStore::default();
+        let mut vnc = ssh("not-ssh", "5.6.7.8");
+        vnc.protocol = Protocol::Vnc;
+        let hop_id = vnc.id;
+        let rdp = rdp_via("win", "10.0.0.8", vec![hop_id]);
+        let rdp_id = rdp.id;
+        store.add(vnc);
+        store.add(rdp);
+
+        match store.resolve_jump_hops(rdp_id) {
+            Err(JumpChainError::NotSsh(name)) => assert_eq!(name, "not-ssh"),
+            other => panic!("expected NotSsh, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_jump_hops_chained() {
+        let mut store = ConnectionStore::default();
+        let a = ssh("a", "1.1.1.1");
+        let b = ssh("b", "2.2.2.2");
+        let rdp = rdp_via("win", "10.0.0.8", vec![a.id, b.id]);
+        let ids = (a.id, b.id, rdp.id);
+        store.add(a);
+        store.add(b);
+        store.add(rdp);
+
+        let hops = store.resolve_jump_hops(ids.2).unwrap();
+        assert_eq!(hops.iter().map(|c| c.id).collect::<Vec<_>>(), vec![ids.0, ids.1]);
+    }
 }
